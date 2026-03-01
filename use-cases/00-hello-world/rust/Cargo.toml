@@ -1,0 +1,8 @@
+[package]
+name = "hello-world"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# rig-core = "0.5"  # Uncomment when using Rig
+# tokio = { version = "1", features = ["full"] }
