@@ -1,0 +1,68 @@
+# Polyglot Agent Labs - Task Runner (Windows)
+# Usage: just -f justfile.win <command> [args]
+
+# Load environment variables from root .env
+set dotenv-load := true
+set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
+
+# Default: list available commands
+default:
+    @just -f justfile.win --list
+
+# =============================================================================
+# USE CASE RUNNERS
+# =============================================================================
+
+# Run Python implementation for a specific use-case
+# Example: just -f justfile.win py 00-hello-world
+py id:
+    cd use-cases/{{id}}/python; if ($?) { $env:PYTHONIOENCODING='utf-8'; uv run main.py }
+
+# Run Rust implementation for a specific use-case
+# Example: just -f justfile.win rs 00-hello-world
+rs id:
+    cd use-cases/{{id}}/rust; if ($?) { cargo run }
+
+# Run both implementations back-to-back for comparison
+# Example: just -f justfile.win compare 00-hello-world
+compare id:
+    @echo "=========================================="
+    @echo "  RUNNING PYTHON (LANGGRAPH) - Use Case {{id}}"
+    @echo "=========================================="
+    just -f justfile.win py {{id}}
+    @echo ""
+    @echo "=========================================="
+    @echo "  RUNNING RUST (RIG) - Use Case {{id}}"
+    @echo "=========================================="
+    just -f justfile.win rs {{id}}
+
+# =============================================================================
+# SETUP & UTILITIES
+# =============================================================================
+
+# Create a new use-case directory structure
+# Example: just -f justfile.win new-case 02-custom-agent
+new-case name:
+    mkdir -p use-cases/{{name}}/python
+    mkdir -p use-cases/{{name}}/rust/src
+    @echo "Created use-cases/{{name}}/"
+
+# Install Python dependencies for a use-case
+py-install id:
+    cd use-cases/{{id}}/python; if ($?) { uv sync }
+
+# Install Rust dependencies for a use-case
+rs-install id:
+    cd use-cases/{{id}}/rust; if ($?) { cargo build }
+
+# =============================================================================
+# QUALITY CHECKS
+# =============================================================================
+
+# Run Python linter for a use-case
+py-lint id:
+    cd use-cases/{{id}}/python; if ($?) { uv run ruff check . }
+
+# Run Rust clippy for a use-case
+rs-lint id:
+    cd use-cases/{{id}}/rust; if ($?) { cargo clippy -- -D warnings }

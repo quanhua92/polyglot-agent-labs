@@ -15,6 +15,7 @@ cp .env.example .env
 
 # 3. Run the hello-world example
 just compare 00-hello-world
+# Note: On Windows, use `just -f justfile.win compare 00-hello-world`
 ```
 
 ## Project Structure
@@ -38,6 +39,8 @@ polyglot-agent-labs/
 | `just rs <id>` | Run Rust agent for a use-case |
 | `just compare <id>` | Run both back-to-back |
 | `just new-case <name>` | Create new use-case structure |
+
+*Note for Windows users: Use `just -f justfile.win <command>` instead of `just <command>`.*
 
 ## Environment Variables
 
