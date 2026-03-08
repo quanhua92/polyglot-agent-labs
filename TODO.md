@@ -19,20 +19,20 @@ A progressive roadmap of use cases, each implemented in **Python** and **Rust** 
 
 **Key learning:** Provider-agnostic LLM calls, API key routing, response parsing.
 
-### Python (`litellm` or `langchain`)
-- [ ] Set up `pyproject.toml` with `litellm` (or `langchain` + provider packages)
-- [ ] Read `LLM_PROVIDER` env var to pick provider (openai / anthropic / openrouter)
-- [ ] Build a provider config map: `{"openai": "gpt-4o-mini", "anthropic": "claude-3-haiku-...", "openrouter": "openrouter/..."}`
-- [ ] Send a `"Hello! Tell me a fun fact about programming."` prompt via the chosen provider
-- [ ] Print the model name, provider, and full response text
-- [ ] Handle errors gracefully (missing API key, network error, invalid provider)
+### Python (`litellm`)
+- [x] Set up `pyproject.toml` with `litellm`, `python-dotenv`
+- [x] Read `LLM_PROVIDER` env var to pick provider (openai / anthropic / openrouter)
+- [x] Build a provider config map: `{"openai": "gpt-4.1-nano", "anthropic": "claude-3-haiku-20240307", "openrouter": "stepfun/step-3.5-flash:free"}`
+- [x] Send a `"Hello! Tell me a fun fact about programming."` prompt via the chosen provider
+- [x] Print the model name, provider, and full response text
+- [x] Handle errors gracefully (missing API key, network error, invalid provider)
 
-### Rust (`rig-core`)
-- [ ] Set up `Cargo.toml` with `rig-core`, `tokio`, `serde`
-- [ ] Read `LLM_PROVIDER` env var
-- [ ] Initialize the appropriate `rig` provider client (`openai::Client`, `anthropic::Client`, or OpenAI-compatible client for OpenRouter)
-- [ ] Send the same prompt and print the response
-- [ ] Handle errors with `anyhow` or `thiserror`
+### Rust (`rig-core 0.32`)
+- [x] Set up `Cargo.toml` with `rig-core 0.32`, `tokio`, `anyhow`
+- [x] Read `LLM_PROVIDER` env var
+- [x] Initialize the appropriate `rig` provider client (`openai::Client`, `anthropic::Client`, `openrouter::Client`)
+- [x] Send the same prompt and print the response
+- [x] Handle errors with `anyhow`
 
 ---
 
