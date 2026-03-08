@@ -43,21 +43,21 @@ A progressive roadmap of use cases, each implemented in **Python** and **Rust** 
 **Key learning:** MCP protocol basics, defining tools, stdio/SSE transport, cross-language interop.
 
 ### Python (`fastmcp`)
-- [ ] Set up `pyproject.toml` with `fastmcp` dependency
-- [ ] Define a `get_weather(city: str) -> str` tool using `@mcp.tool()` decorator
-- [ ] Implement mock weather data (return hardcoded or random weather for a given city)
-- [ ] Configure the server to run over **stdio** transport
-- [ ] Write a simple client script (`client.py`) that connects to the server and calls the tool
-- [ ] Print the tool result from the client side
-- [ ] Test: start server, run client, verify the response
+- [x] Set up `pyproject.toml` with `fastmcp` dependency
+- [x] Define a `get_weather(city: str) -> str` tool using `@mcp.tool()` decorator
+- [x] Implement mock weather data (return hardcoded or random weather for a given city)
+- [x] Configure the server to run over **stdio** transport
+- [x] Write a simple client script (`client.py`) that connects to the server and calls the tool
+- [x] Print the tool result from the client side
+- [x] Test: start server, run client, verify the response
 
 ### Rust (`rmcp`)
-- [ ] Set up `Cargo.toml` with `rmcp` crate + `tokio`
-- [ ] Define a `GetWeather` tool struct implementing the `rmcp` tool trait
-- [ ] Implement the handler returning mock weather data
-- [ ] Serve over **stdio** transport
-- [ ] Write a client binary (or test) that connects and calls `get_weather`
-- [ ] Verify cross-language interop: Python client → Rust server (and vice versa)
+- [x] Set up `Cargo.toml` with `rmcp` crate + `tokio`
+- [x] Define a `GetWeather` tool struct implementing the `rmcp` tool trait
+- [x] Implement the handler returning mock weather data
+- [x] Serve over **stdio** transport
+- [x] Write a client binary (or test) that connects and calls `get_weather`
+- [x] Verify cross-language interop: Python client → Rust server (and vice versa)
 
 ---
 
