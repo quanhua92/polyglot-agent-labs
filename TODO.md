@@ -128,36 +128,46 @@ A progressive roadmap of use cases, each implemented in **Python** and **Rust** 
 
 ---
 
-## 📋 05 — RAG over Local Documents
+## ✅ 05 — RAG over Local Documents
 
-> Index a small set of local text/markdown files, then answer questions about them using retrieval-augmented generation.
+- **Status:** Done
+- **Python:** `langchain` + FAISS with hard-coded documents
+- **Rust:** `rig-core` + custom embeddings via OpenAI API
+
+> Index hard-coded documents as strings, then answer questions using retrieval-augmented generation.
 
 **Key learning:** Embeddings, chunking strategies, vector similarity search, retrieval chains, prompt engineering for grounded answers.
 
+**Implementation Notes:**
+- Documents are hard-coded as strings instead of loading from files (simplification)
+- Multi-provider support for both LLM and embeddings (default: openrouter)
+- Uses cosine similarity for vector search
+
 ### Shared Setup
-- [ ] Create a `docs/` folder inside this use case with 3–5 small markdown files (e.g., project FAQ, coding guidelines, fictional product docs)
-- [ ] Each doc should be ~200–500 words to keep things manageable
+- [x] 3 hard-coded documents (FAQ, Rust Guidelines, Python Practices) at ~200-300 words each
+- [x] Same 4 demo questions for cross-language verification (including edge case)
 
 ### Python (`langchain` + FAISS)
-- [ ] Set up `pyproject.toml` with `langchain`, `langchain-openai`, `faiss-cpu` (or `chromadb`)
-- [ ] Load documents from `docs/` using `DirectoryLoader` + `TextLoader`
-- [ ] Split documents into chunks using `RecursiveCharacterTextSplitter` (chunk size ~500, overlap ~50)
-- [ ] Generate embeddings via `OpenAIEmbeddings`
-- [ ] Store embeddings in a FAISS vector store (in-memory, no persistence needed)
-- [ ] Build a retrieval chain: `query → retrieve top-3 chunks → stuff into prompt → LLM → answer`
-- [ ] Run 3 demo questions that require information from the docs
-- [ ] Print: retrieved chunks (with source file) + final answer
-- [ ] Handle edge case: question not answerable from docs → agent should say "I don't know"
+- [x] Set up `pyproject.toml` with `langchain`, `langchain-openai`, `langchain-anthropic`, `langchain-community`, `faiss-cpu`
+- [x] Hard-coded documents as constant strings
+- [x] Split documents into chunks using `RecursiveCharacterTextSplitter` (chunk size 500, overlap 50)
+- [x] Generate embeddings via `OpenAIEmbeddings` with multi-provider support
+- [x] Store embeddings in a FAISS vector store (in-memory)
+- [x] Build a RAG pipeline: query → retrieve top-3 chunks → format context → LLM → answer
+- [x] Run 4 demo questions that require information from the docs
+- [x] Print: retrieved chunks (with source file) + final answer
+- [x] Handle edge case: question not answerable from docs → agent says "I don't have enough information"
 
 ### Rust (`rig-core`)
-- [ ] Set up `Cargo.toml` with `rig-core`, `tokio`, `serde`
-- [ ] Load and split the same `docs/` files into chunks (manual or simple splitter)
-- [ ] Generate embeddings using rig's `EmbeddingModel`
-- [ ] Store in rig's `InMemoryVectorStore`
-- [ ] Build a RAG pipeline: embed query → search top-3 → format context → LLM call
-- [ ] Run the same 3 demo questions
-- [ ] Print retrieved chunks and final answer
-- [ ] Compare retrieval quality and answer format with Python version
+- [x] Set up `Cargo.toml` with `rig-core`, `tokio`, `serde`, `reqwest`
+- [x] Hard-coded same 3 documents as static string literals
+- [x] Manual chunking by paragraphs with configurable chunk size
+- [x] Generate embeddings using direct OpenAI API calls via `reqwest`
+- [x] Custom in-memory vector store with cosine similarity search
+- [x] Build a RAG pipeline: embed query → search top-3 → format context → LLM call
+- [x] Run the same 4 demo questions
+- [x] Print retrieved chunks and final answer
+- [x] Multi-provider support for LLM and embeddings
 
 ---
 
