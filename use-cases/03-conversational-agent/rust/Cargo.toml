@@ -1,0 +1,10 @@
+[package]
+name = "conversational-agent"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rig-core = "0.32"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+uuid = { version = "1", features = ["v4"] }

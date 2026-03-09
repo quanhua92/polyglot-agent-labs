@@ -61,28 +61,36 @@ A progressive roadmap of use cases, each implemented in **Python** and **Rust** 
 
 ---
 
-## 📋 03 — Conversational Agent with Memory
+## ✅ 03 — Conversational Agent with Memory
 
-> Build a chatbot that maintains conversation history across multiple turns. Interactive terminal REPL where the agent remembers context.
+- **Status:** Done
+- **Python:** `langchain>=1.0.10` + conversation REPL
+- **Rust:** `rig-core>=0.32` + prompt-based conversation history
+
+> Build a chatbot that maintains conversation history across multiple turns. Supports both non-interactive (predefined conversation) and interactive REPL modes.
 
 **Key learning:** State management, conversation loops, context window handling, graceful exit.
 
-### Python (`langgraph`)
-- [ ] Set up `pyproject.toml` with `langgraph`, `langchain-openai` (or `langchain-anthropic`)
-- [ ] Define a `MessageState` schema holding the message history list
-- [ ] Build a simple LangGraph graph: `user_input → llm_call → print_response → loop`
-- [ ] Implement a terminal REPL loop (`while True` with `input()`)
-- [ ] Accumulate `HumanMessage` / `AIMessage` in state across turns
-- [ ] Support `/quit` or `/exit` command to break the loop
-- [ ] Print turn count and token usage (if available) on exit
+### Python (`langchain`)
+- [x] Set up `pyproject.toml` with `langchain>=1.0.10`, `langchain-openai`, `langchain-anthropic`
+- [x] Define a message history list with `SystemMessage`, `HumanMessage`, `AIMessage`
+- [x] Build a simple conversation loop with LLM calls
+- [x] Implement `--interactive` flag for REPL mode (`while True` with `input()`)
+- [x] Default to non-interactive mode with predefined conversation
+- [x] Accumulate messages in history across turns
+- [x] Support `/quit`, `/exit`, `/q` commands to break the loop (interactive mode)
+- [x] Support multi-provider via `LLM_PROVIDER` env var (openai, anthropic, openrouter)
+- [x] Print turn count on exit
 
 ### Rust (`rig-core`)
-- [ ] Set up `Cargo.toml` with `rig-core`, `tokio`
-- [ ] Create a `Vec<rig::completion::Message>` to hold conversation history
-- [ ] Implement a `loop` that reads from stdin, appends user message, calls LLM with full history
-- [ ] Append assistant response to history and print it
-- [ ] Support `/quit` or `/exit` to break
-- [ ] Handle context window limits (truncate oldest messages if needed)
+- [x] Set up `Cargo.toml` with `rig-core>=0.32`, `tokio`
+- [x] Use `AgentBuilder` to create agent from completion model
+- [x] Implement prompt-based conversation history (appending to prompt string)
+- [x] Implement `--interactive` flag for REPL mode (loop with stdin)
+- [x] Default to non-interactive mode with predefined conversation
+- [x] Support `/quit`, `/exit`, `/q` to break (interactive mode)
+- [x] Support multi-provider via `LLM_PROVIDER` env var (openai, anthropic, openrouter)
+- [x] Print turn count on exit
 
 ---
 
