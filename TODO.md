@@ -171,33 +171,37 @@ A progressive roadmap of use cases, each implemented in **Python** and **Rust** 
 
 ---
 
-## 📋 06 — Structured Output & Data Extraction
+## ✅ 06 — Structured Output & Data Extraction
+
+- **Status:** Done
+- **Python:** `langchain` + Pydantic with hard-coded sample inputs
+- **Rust:** `rig-core` + `serde` with hard-coded sample inputs
 
 > Given unstructured text (job listing, product review, email), extract structured data into a typed schema. The LLM outputs validated JSON matching the schema.
 
 **Key learning:** JSON mode / structured output APIs, schema validation, error recovery, typed LLM outputs.
 
 ### Shared Setup
-- [ ] Create 3 sample input files: a job listing, a product review, and an email — plain text
-- [ ] Define the target schemas (e.g., `JobListing { title, company, salary_range, skills[] }`)
+- [x] Create 3 sample inputs as hard-coded strings: a job listing, a product review, and an email
+- [x] Define the target schemas (e.g., `JobListing { title, company, salary_range, skills[] }`)
 
 ### Python (`langchain` + Pydantic)
-- [ ] Set up `pyproject.toml` with `langchain`, `langchain-openai`, `pydantic`
-- [ ] Define Pydantic models for each extraction target:
-  - [ ] `JobListing` — title, company, location, salary_range, required_skills
-  - [ ] `ProductReview` — product_name, rating, pros, cons, summary
-  - [ ] `EmailInfo` — sender, recipients, subject, action_items, urgency
-- [ ] Use `llm.with_structured_output(Model)` to extract data
-- [ ] Run extraction on each sample input and pretty-print the resulting model
-- [ ] Validate: assert all required fields are populated
-- [ ] Handle malformed output gracefully (retry or fallback)
+- [x] Set up `pyproject.toml` with `langchain`, `langchain-openai`, `pydantic`
+- [x] Define Pydantic models for each extraction target:
+  - [x] `JobListing` — title, company, location, salary_range, required_skills, employment_type, description
+  - [x] `ProductReview` — product_name, rating, pros, cons, summary, would_recommend
+  - [x] `EmailInfo` — sender, recipients, subject, action_items, urgency, key_points, deadline
+- [x] Use `llm.with_structured_output(Model)` to extract data
+- [x] Run extraction on each sample input and pretty-print the resulting model
+- [x] Validate: check that all required fields are populated
+- [x] Handle malformed output gracefully with retry logic (max 2 retries)
 
-### Rust (`rig-core` + `serde` + `schemars`)
-- [ ] Set up `Cargo.toml` with `rig-core`, `tokio`, `serde`, `schemars`
-- [ ] Define equivalent Rust structs with `#[derive(Deserialize, JsonSchema)]`
-- [ ] Use rig's extractor / structured output to parse LLM response into structs
-- [ ] Run the same 3 extractions and print with `Debug` or `serde_json::to_string_pretty`
-- [ ] Compare extraction accuracy with Python version
+### Rust (`rig-core` + `serde`)
+- [x] Set up `Cargo.toml` with `rig-core`, `tokio`, `serde`
+- [x] Define equivalent Rust structs with `#[derive(Deserialize, Serialize)]`
+- [x] Use agent.chat() with explicit JSON schema prompts to parse LLM response into structs
+- [x] Run the same 3 extractions and print with `serde_json::to_string_pretty`
+- [x] Handle JSON extraction from LLM responses with helper function
 
 ---
 
