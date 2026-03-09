@@ -233,33 +233,40 @@ A progressive roadmap of use cases, each implemented in **Python** and **Rust** 
 
 ---
 
-## 📋 08 — Multi-Agent Collaboration (Researcher + Writer)
+## ✅ 08 — Multi-Agent Collaboration (Researcher + Writer)
+
+- **Status:** Done
+- **Python:** `langgraph>=1.0.10` + ReAct researcher + writer agents
+- **Rust:** `rig-core>=0.32` + manual ReAct loop + writer agent
 
 > Two agents work together: a **Researcher** gathers information using tools, then a **Writer** takes the findings and produces a polished document. Orchestrated as a pipeline.
 
 **Key learning:** Agent composition, role specialization, inter-agent communication, workflow orchestration.
 
 ### Python (`langgraph`)
-- [ ] Set up `pyproject.toml` with `langgraph`, `langchain-openai`
-- [ ] Define **Researcher** agent:
-  - [ ] System prompt: "You are a research assistant. Gather key facts about the given topic."
-  - [ ] Has access to a `search_notes(query)` tool (mock: searches a local knowledge base)
-  - [ ] Returns structured findings: `{ facts: [...], sources: [...] }`
-- [ ] Define **Writer** agent:
-  - [ ] System prompt: "You are a technical writer. Turn research findings into a clear, well-structured article."
-  - [ ] Takes Researcher output as context
-  - [ ] Returns a formatted markdown document
-- [ ] Build a LangGraph: `researcher_node → writer_node → output`
-  - [ ] Optionally add a **Reviewer** node that sends feedback back to Writer (loop)
-- [ ] Demo topic: `"Explain the benefits of Rust for systems programming"`
-- [ ] Print both the raw research findings and the final polished article
+- [x] Set up `pyproject.toml` with `langgraph`, `langchain-openai`
+- [x] Define **Researcher** agent with ReAct loop:
+  - [x] System prompt: "You are a research assistant. Gather key facts about the given topic."
+  - [x] Has access to a `search_notes(query)` tool (mock: searches a local knowledge base)
+  - [x] Returns structured findings: `{ facts: [...], sources: [...] }`
+- [x] Define **Writer** agent:
+  - [x] System prompt: "You are a technical writer. Turn research findings into a clear, well-structured article."
+  - [x] Takes Researcher output as context
+  - [x] Returns a formatted markdown document
+- [x] Build a LangGraph with ReAct researcher loop: `researcher → tools? | increment → should_continue? → writer → output`
+- [x] Demo topic: `"Explain the benefits of Rust for systems programming"`
+- [x] Print both the raw research findings and the final polished article
+- [x] Track and report iteration count (max 5)
+- [x] Multi-provider support (openai, anthropic, openrouter)
 
 ### Rust (`rig-core`)
-- [ ] Set up `Cargo.toml` with `rig-core`, `tokio`, `serde`
-- [ ] Create two separate rig agents with different system prompts and tools
-- [ ] Pipe the output of the Researcher into the Writer's prompt
-- [ ] Implement the same demo topic
-- [ ] Compare article quality and structure with Python output
+- [x] Set up `Cargo.toml` with `rig-core`, `tokio`, `serde`
+- [x] Create two separate rig agents with different system prompts and tools
+- [x] Implement manual ReAct loop with iteration tracking
+- [x] Pipe the output of the Researcher into the Writer's prompt
+- [x] Implement the same demo topic
+- [x] Track and report iteration count (max 5)
+- [x] Multi-provider support (openai, anthropic, openrouter)
 
 ---
 
