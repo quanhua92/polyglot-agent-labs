@@ -94,33 +94,37 @@ A progressive roadmap of use cases, each implemented in **Python** and **Rust** 
 
 ---
 
-## 📋 04 — Agent with Tool Use (Function Calling)
+## ✅ 04 — Agent with Tool Use (Function Calling)
+
+- **Status:** Done
+- **Python:** `langgraph>=1.0.10` + tool definitions with `@tool` decorator
+- **Rust:** `rig-core>=0.32` + Tool trait implementation
 
 > Create an agent that can decide when to call external tools (calculator, date/time, string utilities) to answer user questions. The LLM chooses which tool to invoke.
 
 **Key learning:** Function calling / tool-use APIs, tool schemas, agent decision loops, structured output.
 
 ### Python (`langgraph` + `@tool`)
-- [ ] Set up `pyproject.toml` with `langgraph`, `langchain-openai`
-- [ ] Define 3 tools using `@tool` decorator:
-  - [ ] `calculator(expression: str) -> str` — evaluates a math expression
-  - [ ] `get_current_time() -> str` — returns current date/time
-  - [ ] `string_length(text: str) -> int` — returns length of a string
-- [ ] Build a LangGraph graph with tool nodes: `agent → should_call_tool? → tool_node → agent`
-- [ ] Implement the conditional edge (if LLM response has tool calls → route to tool node, else → end)
-- [ ] Run 3 demo prompts:
-  - [ ] `"What is 42 * 137?"` → should use calculator
-  - [ ] `"What time is it right now?"` → should use get_current_time
-  - [ ] `"How many characters in 'Polyglot Agent Labs'?"` → should use string_length
-- [ ] Print the agent's reasoning chain (tool calls + final answer)
+- [x] Set up `pyproject.toml` with `langgraph`, `langchain-openai`
+- [x] Define 3 tools using `@tool` decorator:
+  - [x] `calculator(expression: str) -> str` — evaluates a math expression
+  - [x] `get_current_time() -> str` — returns current date/time
+  - [x] `string_length(text: str) -> int` — returns length of a string
+- [x] Build a LangGraph graph with tool nodes: `agent → should_call_tool? → tool_node → agent`
+- [x] Implement the conditional edge (if LLM response has tool calls → route to tool node, else → end)
+- [x] Run 3 demo prompts:
+  - [x] `"What is 42 * 137?"` → should use calculator
+  - [x] `"What time is it right now?"` → should use get_current_time
+  - [x] `"How many characters in 'Polyglot Agent Labs'?"` → should use string_length
+- [x] Print the agent's reasoning chain (tool calls + final answer)
 
-### Rust (`rig-core` + `#[tool]`)
-- [ ] Set up `Cargo.toml` with `rig-core`, `tokio`, `serde`
-- [ ] Define the same 3 tools using rig's `#[tool]` derive macro
-- [ ] Attach tools to a rig agent via `.tool(...)` builder
-- [ ] Run the same 3 demo prompts
-- [ ] Print tool invocations and final responses
-- [ ] Compare output format with Python version
+### Rust (`rig-core` + Tool trait)
+- [x] Set up `Cargo.toml` with `rig-core`, `tokio`, `serde`
+- [x] Define the same 3 tools using rig's `Tool` trait
+- [x] Attach tools to a rig agent via `.tool(...)` builder
+- [x] Run the same 3 demo prompts
+- [x] Print tool invocations and final responses
+- [x] Compare output format with Python version
 
 ---
 
