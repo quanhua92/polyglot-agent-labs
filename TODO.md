@@ -461,30 +461,36 @@ A progressive roadmap of use cases, each implemented in **Python** and **Rust** 
 
 ---
 
-## 📋 14 — Content Writing Agent (Blog Generator)
+## ✅ 14 — Content Writing Agent (Blog Generator)
+
+- **Status:** Done
+- **Python:** `langgraph>=0.2.0` + multi-stage pipeline + quality gate loop
+- **Rust:** `rig-core>=0.32` + agent chaining + quality gate loop
 
 > An agent that takes a topic and writes a full blog post through multiple stages: outline → research → draft → edit → final. Each stage is a distinct agent or prompt.
 
 **Key learning:** Multi-stage pipelines, prompt chaining, quality control loops, long-form generation.
 
 ### Python (`langgraph`)
-- [ ] Set up `pyproject.toml` with `langgraph`, `langchain-openai`
-- [ ] Build a multi-stage pipeline graph:
-  - [ ] **Outliner** — generates a structured outline (title, sections, key points per section)
-  - [ ] **Researcher** — for each section, generates relevant talking points / facts
-  - [ ] **Drafter** — writes the full prose for each section based on outline + research
-  - [ ] **Editor** — reviews the draft, checks for coherence, tone, grammar; suggests edits
-  - [ ] **Finalizer** — applies edits and produces the final markdown document
-- [ ] Add a quality gate: Editor scores the draft 1–10; if < 7, send back to Drafter (max 2 revisions)
-- [ ] Demo: `"Write a blog post about why developers should learn both Python and Rust"`
-- [ ] Output: save final article as `output.md`, print word count and revision count
+- [x] Set up `pyproject.toml` with `langgraph`, `langchain-openai`
+- [x] Build a multi-stage pipeline graph:
+  - [x] **Outliner** — generates a structured outline (title, sections, key points per section)
+  - [x] **Researcher** — for each section, generates relevant talking points / facts
+  - [x] **Drafter** — writes the full prose for each section based on outline + research
+  - [x] **Editor** — reviews the draft, checks for coherence, tone, grammar; suggests edits
+  - [x] **Finalizer** — applies edits and produces the final markdown document
+- [x] Add a quality gate: Editor scores the draft 1–10; if < 7, send back to Drafter (max 2 revisions)
+- [x] Demo: `"Why developers should learn both Python and Rust"`
+- [x] Output: save final article as `output.md`, print word count and revision count
+- [x] Multi-provider support (openai, anthropic, openrouter)
 
 ### Rust (`rig-core`)
-- [ ] Set up `Cargo.toml` with `rig-core`, `tokio`, `serde`
-- [ ] Implement each stage as a separate rig agent with a specialized system prompt
-- [ ] Chain them together, passing structured output between stages
-- [ ] Implement the same quality gate loop
-- [ ] Save output to `output.md` and compare with Python version
+- [x] Set up `Cargo.toml` with `rig-core`, `tokio`, `serde`, `thiserror`
+- [x] Implement each stage as a separate prompt with specialized system prompts
+- [x] Chain them together, passing structured output between stages
+- [x] Implement the same quality gate loop (score < 7 triggers revision, max 2)
+- [x] Save output to `output.md` and compare with Python version
+- [x] Multi-provider support (openai, anthropic, openrouter)
 
 ---
 
