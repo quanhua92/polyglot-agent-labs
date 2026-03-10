@@ -163,18 +163,21 @@ PROVIDERS = {
 
 def create_chat_model(provider: str, model_id: str) -> BaseChatModel:
     """Create the appropriate chat model based on provider."""
+    # Common timeout settings for all providers
+    timeout = 30.0  # 30 seconds for fast failure
+
     if provider == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             print("✗ OPENAI_API_KEY not set")
             sys.exit(1)
-        return ChatOpenAI(model=model_id, api_key=api_key)
+        return ChatOpenAI(model=model_id, api_key=api_key, timeout=timeout)
     elif provider == "anthropic":
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
             print("✗ ANTHROPIC_API_KEY not set")
             sys.exit(1)
-        return ChatAnthropic(model=model_id, api_key=api_key)
+        return ChatAnthropic(model=model_id, api_key=api_key, timeout=timeout)
     elif provider == "openrouter":
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
@@ -184,6 +187,7 @@ def create_chat_model(provider: str, model_id: str) -> BaseChatModel:
             model=model_id,
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1",
+            timeout=timeout,
         )
     else:
         print(f"✗ Unknown provider type: '{provider}'")
@@ -217,11 +221,9 @@ def create_workflow_graph(model: BaseChatModel):
     model_with_tools = model.bind_tools(WORKFLOW_TOOLS)
 
     async def agent_node(state: WorkflowState) -> dict:
-        """Agent node that processes instructions and calls tools."""
+        """Agent node that decides what to do next."""
         messages = state["messages"]
         instruction = state.get("instruction", "")
-        tool_calls_made = state.get("tool_calls_made", 0)
-        max_turns = state.get("max_turns", 5)
 
         # If this is the first turn, add the instruction
         if not messages:
@@ -232,48 +234,59 @@ def create_workflow_graph(model: BaseChatModel):
 
         # Get response from model
         response = await model_with_tools.ainvoke(messages)
-        messages.append(response)
+        return {"messages": [response]}
 
-        # Check if the model wants to call tools
-        if hasattr(response, 'tool_calls') and response.tool_calls:
-            # Execute all tool calls
-            for tool_call in response.tool_calls:
-                tool_name = tool_call.get("name", "")
-                tool_args = tool_call.get("args", {})
-                tool_id = tool_call.get("id", "")
+    async def tool_node(state: WorkflowState) -> dict:
+        """Tool node that executes tool calls."""
+        messages = state["messages"]
+        tool_calls_made = state.get("tool_calls_made", 0)
 
-                # Find and execute the tool
-                tool = next((t for t in WORKFLOW_TOOLS if t.name == tool_name), None)
-                if tool:
-                    result = tool.func(**tool_args)
-                    messages.append(ToolMessage(content=str(result), tool_call_id=tool_id))
-                    tool_calls_made += 1
-                else:
-                    messages.append(ToolMessage(content=f"Error: Tool '{tool_name}' not found", tool_call_id=tool_id))
+        # Find the last AI message with tool calls
+        last_ai_message = None
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage) and hasattr(msg, 'tool_calls') and msg.tool_calls:
+                last_ai_message = msg
+                break
 
-            return {
-                "messages": messages,
-                "tool_calls_made": tool_calls_made,
-            }
+        if not last_ai_message:
+            return {"messages": []}
 
-        # No tool calls, we're done
+        # Execute all tool calls
+        tool_messages = []
+        for tool_call in last_ai_message.tool_calls:
+            tool_name = tool_call.get("name", "")
+            tool_args = tool_call.get("args", {})
+            tool_id = tool_call.get("id", "")
+
+            # Find and execute the tool
+            tool = next((t for t in WORKFLOW_TOOLS if t.name == tool_name), None)
+            if tool:
+                result = tool.func(**tool_args)
+                tool_messages.append(ToolMessage(content=str(result), tool_call_id=tool_id))
+                tool_calls_made += 1
+            else:
+                tool_messages.append(ToolMessage(content=f"Error: Tool '{tool_name}' not found", tool_call_id=tool_id))
+
         return {
-            "messages": messages,
+            "messages": tool_messages,
             "tool_calls_made": tool_calls_made,
         }
 
-    def should_continue(state: WorkflowState) -> Literal["agent", END]:
-        """Decide whether to continue calling the agent."""
+    def should_continue(state: WorkflowState) -> Literal["agent", "tools", END]:
+        """Decide whether to continue calling the agent or tools."""
         messages = state["messages"]
-        tool_calls_made = state.get("tool_calls_made", 0)
-        max_turns = state.get("max_turns", 5)
 
-        # Check if the last message has tool calls
-        if messages and hasattr(messages[-1], 'tool_calls') and messages[-1].tool_calls:
+        if not messages:
             return "agent"
 
-        # Check if we've made tool calls but agent has more to say
-        if tool_calls_made > 0 and tool_calls_made < max_turns:
+        last_message = messages[-1]
+
+        # If the last message has tool calls, execute them
+        if isinstance(last_message, AIMessage) and hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+            return "tools"
+
+        # If the last message is a ToolMessage, go back to agent
+        if isinstance(last_message, ToolMessage):
             return "agent"
 
         # Otherwise we're done
@@ -282,8 +295,10 @@ def create_workflow_graph(model: BaseChatModel):
     # Build the graph using functional API
     workflow = StateGraph(WorkflowState)
     workflow.add_node("agent", agent_node)
+    workflow.add_node("tools", tool_node)
     workflow.set_entry_point("agent")
     workflow.add_conditional_edges("agent", should_continue)
+    workflow.add_edge("tools", "agent")
     return workflow.compile()
 
 
@@ -301,7 +316,7 @@ async def run_demo_async(model: BaseChatModel, provider_name: str, model_id: str
     graph = create_workflow_graph(model)
 
     for i, instruction in enumerate(DEMO_SCENARIOS, 1):
-        print(f"[{i}/{len(DEMO_SCENARIOS)}] {instruction}")
+        print(f"\n[{i}/{len(DEMO_SCENARIOS)}] {instruction}")
         print("-" * 60)
 
         # Initialize state
@@ -309,41 +324,49 @@ async def run_demo_async(model: BaseChatModel, provider_name: str, model_id: str
             "messages": [],
             "instruction": instruction,
             "tool_calls_made": 0,
-            "max_turns": 5,
+            "max_turns": 10,
         }
 
         try:
+            # Track all messages from streaming
+            all_messages = []
+            agent_responses = []
+
             # Stream the graph execution
             async for event in graph.astream(initial_state):
                 for node_name, node_output in event.items():
-                    if node_name == "agent":
-                        messages = node_output.get("messages", [])
-                        tool_calls_made = node_output.get("tool_calls_made", 0)
+                    new_messages = node_output.get("messages", [])
+                    all_messages.extend(new_messages)
 
-                        # Print tool calls
-                        for msg in messages[2:]:  # Skip system and initial human message
+                    if node_name == "agent" and new_messages:
+                        for msg in new_messages:
+                            if isinstance(msg, AIMessage):
+                                agent_responses.append(msg)
+                                # Show tool call intent
+                                if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                                    print(f"Agent: {msg.content if msg.content else '[Calling tools...]'}")
+                                    for tc in msg.tool_calls:
+                                        print(f"  → {tc.get('name', 'unknown')}")
+                                # Show final response
+                                elif msg.content and not any(
+                                    m.content == msg.content for m in agent_responses[:-1] if isinstance(m, AIMessage) and m.content
+                                ):
+                                    print(f"\nAgent: {msg.content}\n")
+
+                    elif node_name == "tools" and new_messages:
+                        for msg in new_messages:
                             if isinstance(msg, ToolMessage):
-                                tool_name = msg.content.split(":")[0] if ":" in msg.content else "tool"
-                                print(f"  [tool_call]")
-                                print(f"    {msg.content}")
-                            elif isinstance(msg, AIMessage) and tool_calls_made > 0:
-                                print(f"\nAgent: {msg.content}")
-
-            # Print final agent response if no tools were called
-            final_messages = initial_state.get("messages", [])
-            if final_messages and len(final_messages) > 2:
-                last_msg = final_messages[-1]
-                if isinstance(last_msg, AIMessage):
-                    print(f"\nAgent: {last_msg.content}")
+                                print(f"  ✓ {msg.content}")
 
         except Exception as e:
+            import traceback
             print(f"\n✗ Error: {e}")
+            print(f"Traceback:\n{traceback.format_exc()}")
 
         print("=" * 60)
-        print()
 
     # Print session summary
-    print("Session Summary")
+    print("\nSession Summary")
     print(f"  Scenarios processed: {len(DEMO_SCENARIOS)}")
 
 
