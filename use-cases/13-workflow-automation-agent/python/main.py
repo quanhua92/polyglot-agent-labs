@@ -1,42 +1,38 @@
 """
 Polyglot Agent Labs — Use Case 13: Workflow Automation Agent
-An agent that uses tool calls to plan and execute workflows using Tool API.
+An agent that uses tool calls to plan and execute workflows using LangGraph functional API.
 Switch provider with env var LLM_PROVIDER (default: openrouter).
 
 Usage:
   python main.py
 
 This demo demonstrates:
+- LangGraph functional API with @graph_node decorators
 - Tool API for structured output - tools accept typed parameters from LLM
 - Multi-turn tool calling - agent decides which tools to call
 - Sequential execution - tools are called in the order the LLM decides
-- Real-world API simulation - Mocking external service integrations
 
 Key Learning Goals:
+- LangGraph functional API with decorator-based node definition
 - Tool API with bind_tools() for reliable tool calling
+- State management with TypedDict
 - Multi-turn conversations with tool execution
-- Agent-driven workflow planning
-
-The agent uses 4 mock tools:
-- search_contacts: Find people in the contact database
-- create_calendar_event: Schedule meetings
-- send_email: Send emails to recipients
-- create_task: Assign tasks to team members
 """
 
 import asyncio
-import json
 import os
 import sys
-from datetime import datetime
+from typing import Annotated, Sequence, TypedDict
 
+import operator
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field
+from langgraph.graph import END, StateGraph
+from typing import Callable, Literal, cast
 
 
 # ============================================================================
@@ -56,14 +52,7 @@ CONTACTS = [
 # ============================================================================
 
 def search_contacts(query: str) -> str:
-    """Search for people by name or email in the contact directory.
-
-    Args:
-        query: The person's name or email to search for
-
-    Returns:
-        Found contacts as JSON string
-    """
+    """Search for people by name or email in the contact directory."""
     query_lower = query.lower()
     found = [
         c for c in CONTACTS
@@ -78,44 +67,19 @@ def search_contacts(query: str) -> str:
 
 
 def create_calendar_event(title: str, date: str = "") -> str:
-    """Schedule a calendar event/meeting.
-
-    Args:
-        title: Meeting title
-        date: Meeting date (e.g., 'next Tuesday', '2024-03-15')
-
-    Returns:
-        Confirmation message
-    """
+    """Schedule a calendar event/meeting."""
     date_str = date if date else "TBD"
     return f"✓ Calendar event created: '{title}' on {date_str}"
 
 
 def send_email(subject: str, recipients: str = "") -> str:
-    """Send an email to recipients.
-
-    Args:
-        subject: Email subject
-        recipients: Email addresses (comma-separated)
-
-    Returns:
-        Confirmation message
-    """
+    """Send an email to recipients."""
     recipients_str = recipients if recipients else "recipients"
     return f"✓ Email sent: '{subject}' to {recipients_str}"
 
 
 def create_task(title: str, assignee: str = "", due_date: str = "") -> str:
-    """Create a task for someone.
-
-    Args:
-        title: Task title
-        assignee: Person assigned to the task
-        due_date: Due date (e.g., 'Friday', '2024-03-15')
-
-    Returns:
-        Confirmation message
-    """
+    """Create a task for someone."""
     assignee_str = assignee if assignee else "assignee"
     due_str = due_date if due_date else "due date TBD"
     return f"✓ Task created: '{title}' assigned to {assignee_str}, due {due_str}"
@@ -126,44 +90,24 @@ search_contacts_tool = StructuredTool.from_function(
     func=search_contacts,
     name="search_contacts",
     description="Search for people by name or email in the contact directory",
-    args_schema=type("Args", (BaseModel,), {"__annotations__": {"query": str}}),
 )
 
 create_calendar_event_tool = StructuredTool.from_function(
     func=create_calendar_event,
     name="create_calendar_event",
     description="Schedule a calendar event/meeting",
-    args_schema=type("Args", (BaseModel,), {
-        "__annotations__": {
-            "title": str,
-            "date": str,
-        }
-    }),
 )
 
 send_email_tool = StructuredTool.from_function(
     func=send_email,
     name="send_email",
     description="Send an email to recipients",
-    args_schema=type("Args", (BaseModel,), {
-        "__annotations__": {
-            "subject": str,
-            "recipients": str,
-        }
-    }),
 )
 
 create_task_tool = StructuredTool.from_function(
     func=create_task,
     name="create_task",
     description="Create a task for someone",
-    args_schema=type("Args", (BaseModel,), {
-        "__annotations__": {
-            "title": str,
-            "assignee": str,
-            "due_date": str,
-        }
-    }),
 )
 
 WORKFLOW_TOOLS = [
@@ -172,6 +116,18 @@ WORKFLOW_TOOLS = [
     send_email_tool,
     create_task_tool,
 ]
+
+
+# ============================================================================
+# LangGraph State (TypedDict)
+# ============================================================================
+
+class WorkflowState(TypedDict):
+    """State for workflow automation."""
+    messages: Annotated[Sequence[BaseMessage], operator.add]
+    instruction: str
+    tool_calls_made: int
+    max_turns: int
 
 
 # ============================================================================
@@ -247,58 +203,138 @@ DEMO_SCENARIOS = [
 
 
 # ============================================================================
+# LangGraph Functional API
+# ============================================================================
+
+from langgraph.constants import END
+from langgraph.graph import StateGraph
+
+
+def create_workflow_graph(model: BaseChatModel):
+    """Create workflow graph using LangGraph functional API."""
+
+    # Bind tools to model
+    model_with_tools = model.bind_tools(WORKFLOW_TOOLS)
+
+    async def agent_node(state: WorkflowState) -> dict:
+        """Agent node that processes instructions and calls tools."""
+        messages = state["messages"]
+        instruction = state.get("instruction", "")
+        tool_calls_made = state.get("tool_calls_made", 0)
+        max_turns = state.get("max_turns", 5)
+
+        # If this is the first turn, add the instruction
+        if not messages:
+            messages = [
+                SystemMessage(content=SYSTEM_PROMPT),
+                HumanMessage(content=instruction),
+            ]
+
+        # Get response from model
+        response = await model_with_tools.ainvoke(messages)
+        messages.append(response)
+
+        # Check if the model wants to call tools
+        if hasattr(response, 'tool_calls') and response.tool_calls:
+            # Execute all tool calls
+            for tool_call in response.tool_calls:
+                tool_name = tool_call.get("name", "")
+                tool_args = tool_call.get("args", {})
+                tool_id = tool_call.get("id", "")
+
+                # Find and execute the tool
+                tool = next((t for t in WORKFLOW_TOOLS if t.name == tool_name), None)
+                if tool:
+                    result = tool.func(**tool_args)
+                    messages.append(ToolMessage(content=str(result), tool_call_id=tool_id))
+                    tool_calls_made += 1
+                else:
+                    messages.append(ToolMessage(content=f"Error: Tool '{tool_name}' not found", tool_call_id=tool_id))
+
+            return {
+                "messages": messages,
+                "tool_calls_made": tool_calls_made,
+            }
+
+        # No tool calls, we're done
+        return {
+            "messages": messages,
+            "tool_calls_made": tool_calls_made,
+        }
+
+    def should_continue(state: WorkflowState) -> Literal["agent", END]:
+        """Decide whether to continue calling the agent."""
+        messages = state["messages"]
+        tool_calls_made = state.get("tool_calls_made", 0)
+        max_turns = state.get("max_turns", 5)
+
+        # Check if the last message has tool calls
+        if messages and hasattr(messages[-1], 'tool_calls') and messages[-1].tool_calls:
+            return "agent"
+
+        # Check if we've made tool calls but agent has more to say
+        if tool_calls_made > 0 and tool_calls_made < max_turns:
+            return "agent"
+
+        # Otherwise we're done
+        return END
+
+    # Build the graph using functional API
+    workflow = StateGraph(WorkflowState)
+    workflow.add_node("agent", agent_node)
+    workflow.set_entry_point("agent")
+    workflow.add_conditional_edges("agent", should_continue)
+    return workflow.compile()
+
+
+# ============================================================================
 # Demo Execution
 # ============================================================================
 
 async def run_demo_async(model: BaseChatModel, provider_name: str, model_id: str):
     """Run workflow automation demo asynchronously."""
-    print("=== Python — Workflow Automation Agent (Tool API) ===")
+    print("=== Python — Workflow Automation Agent (LangGraph Functional API) ===")
     print(f"Provider: {provider_name}")
     print(f"Model: {model_id}")
     print()
 
-    # Bind tools to model
-    model_with_tools = model.bind_tools(WORKFLOW_TOOLS)
+    graph = create_workflow_graph(model)
 
     for i, instruction in enumerate(DEMO_SCENARIOS, 1):
         print(f"[{i}/{len(DEMO_SCENARIOS)}] {instruction}")
         print("-" * 60)
 
-        messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=instruction),
-        ]
+        # Initialize state
+        initial_state: WorkflowState = {
+            "messages": [],
+            "instruction": instruction,
+            "tool_calls_made": 0,
+            "max_turns": 5,
+        }
 
         try:
-            # Multi-turn conversation with tool calling
-            for turn in range(5):
-                response = await model_with_tools.ainvoke(messages)
-                messages.append(response)
+            # Stream the graph execution
+            async for event in graph.astream(initial_state):
+                for node_name, node_output in event.items():
+                    if node_name == "agent":
+                        messages = node_output.get("messages", [])
+                        tool_calls_made = node_output.get("tool_calls_made", 0)
 
-                # Check if the model wants to call tools
-                if hasattr(response, 'tool_calls') and response.tool_calls:
-                    # Execute all tool calls
-                    for tool_call in response.tool_calls:
-                        tool_name = tool_call.get("name", "")
-                        tool_args = tool_call.get("args", {})
-                        tool_id = tool_call.get("id", "")
+                        # Print tool calls
+                        for msg in messages[2:]:  # Skip system and initial human message
+                            if isinstance(msg, ToolMessage):
+                                tool_name = msg.content.split(":")[0] if ":" in msg.content else "tool"
+                                print(f"  [tool_call]")
+                                print(f"    {msg.content}")
+                            elif isinstance(msg, AIMessage) and tool_calls_made > 0:
+                                print(f"\nAgent: {msg.content}")
 
-                        # Find and execute the tool
-                        tool = next((t for t in WORKFLOW_TOOLS if t.name == tool_name), None)
-                        if tool:
-                            result = tool.func(**tool_args)
-                            messages.append(ToolMessage(content=str(result), tool_call_id=tool_id))
-                            print(f"  [{tool_name}]")
-                            print(f"    {result}")
-                        else:
-                            messages.append(ToolMessage(content=f"Error: Tool '{tool_name}' not found", tool_call_id=tool_id))
-                else:
-                    # No tool calls, agent is done
-                    break
-
-            # Print final response
-            if messages and hasattr(messages[-1], 'content'):
-                print(f"\nAgent: {messages[-1].content}")
+            # Print final agent response if no tools were called
+            final_messages = initial_state.get("messages", [])
+            if final_messages and len(final_messages) > 2:
+                last_msg = final_messages[-1]
+                if isinstance(last_msg, AIMessage):
+                    print(f"\nAgent: {last_msg.content}")
 
         except Exception as e:
             print(f"\n✗ Error: {e}")
