@@ -300,37 +300,45 @@ A progressive roadmap of use cases, each implemented in **Python** and **Rust** 
 
 ---
 
-## 📋 10 — Customer Support Agent
+## ✅ 10 — Customer Support Agent
+- **Status:** Done
+- **Python:** `langgraph>=0.2.0` + Intent classification + RAG KB retrieval + Escalation logic
+- **Rust:** `rig-core>=0.32` + Intent classification + RAG KB retrieval + Escalation logic
 
 > A complete support pipeline: classify intent → retrieve knowledge base articles → generate response → escalate if needed. Handles multi-turn conversations.
 
 **Key learning:** Intent classification, conditional routing, knowledge bases, escalation patterns, conversation flows.
 
 ### Shared Setup
-- [ ] Create a `knowledge_base/` folder with 5–10 FAQ-style articles (returns policy, shipping info, billing, account issues, etc.)
-- [ ] Define intent categories: `billing`, `shipping`, `returns`, `account`, `general`, `escalate`
+- [x] Create a hard-coded knowledge base with 6 FAQ-style articles (returns policy, shipping info, billing, account issues, order status, contact info)
+- [x] Define intent categories: `billing`, `shipping`, `returns`, `account`, `general`, `escalate`
+- [x] Escalation threshold: 0.6 confidence
 
 ### Python (`langgraph`)
-- [ ] Set up `pyproject.toml` with `langgraph`, `langchain-openai`, `faiss-cpu`
-- [ ] Build the graph with these nodes:
-  - [ ] **Intent Classifier** — determines intent + confidence from user message
-  - [ ] **KB Retriever** — RAG lookup in knowledge base (reuses patterns from use case 05)
-  - [ ] **Response Generator** — drafts a helpful reply using KB context
-  - [ ] **Escalation Check** — if confidence < threshold or user explicitly asks → route to human
-  - [ ] **Human Escalation** — prints "🚨 Transferring to human agent..." and logs the conversation
-- [ ] Implement as an interactive REPL (multi-turn, remembers context)
-- [ ] Demo scenarios:
-  - [ ] `"How do I return a product?"` → retrieves return policy → generates answer
-  - [ ] `"I want to speak to a manager"` → escalates
-  - [ ] `"What's the status of order #12345?"` → responds with info or escalates
-- [ ] Print: detected intent, confidence score, retrieved articles, final response
+- [x] Set up `pyproject.toml` with `langgraph`, `langchain-openai`, `faiss-cpu`, `langchain-anthropic`
+- [x] Build the graph with these nodes:
+  - [x] **Intent Classifier** — determines intent + confidence from user message (uses manual JSON extraction)
+  - [x] **KB Retriever** — RAG lookup in knowledge base (reuses patterns from use case 05)
+  - [x] **Response Generator** — drafts a helpful reply using KB context
+  - [x] **Escalation Check** — if confidence < threshold or user explicitly asks → route to human
+  - [x] **Human Escalation** — prints "🚨 Transferring to human agent..." and logs the conversation
+- [x] Implement as an interactive REPL (multi-turn, remembers context)
+- [x] Demo scenarios:
+  - [x] `"How do I return a product?"` → retrieves return policy → generates answer
+  - [x] `"I want to speak to a manager"` → escalates
+  - [x] `"What's the status of order #12345?"` → responds with info
+- [x] Print: detected intent, confidence score, retrieved articles, final response
+- [x] Multi-provider support (openai, anthropic, openrouter)
+- [x] Demo mode with `--demo` flag, interactive mode with `--interactive` flag
 
 ### Rust (`rig-core`)
-- [ ] Set up `Cargo.toml` with `rig-core`, `tokio`, `serde`
-- [ ] Implement intent classification using structured output (returns `Intent` enum + confidence)
-- [ ] Reuse RAG pattern from use case 05 for KB retrieval
-- [ ] Build conditional routing: intent → handler function → response or escalation
-- [ ] Same REPL-style demo with multi-turn support
+- [x] Set up `Cargo.toml` with `rig-core`, `tokio`, `serde`, `reqwest`
+- [x] Implement intent classification using structured output (returns `IntentClassification` struct + confidence)
+- [x] Reuse RAG pattern from use case 05 for KB retrieval
+- [x] Build conditional routing: intent → handler function → response or escalation
+- [x] Same REPL-style demo with multi-turn support
+- [x] Multi-provider support (openai, anthropic, openrouter)
+- [x] Demo mode with `--demo` flag, interactive mode with `--interactive` flag
 
 ---
 
