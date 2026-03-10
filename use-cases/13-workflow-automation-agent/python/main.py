@@ -1,461 +1,202 @@
 """
 Polyglot Agent Labs — Use Case 13: Workflow Automation Agent
-An agent that decomposes high-level instructions into executable steps using mock tools.
+An agent that uses tool calls to plan and execute workflows using Tool API.
 Switch provider with env var LLM_PROVIDER (default: openrouter).
 
 Usage:
   python main.py
 
 This demo demonstrates:
-- Task decomposition: Breaking complex instructions into atomic steps
-- Sequential tool execution: Executing tools in dependency order
-- Error recovery: Handling partial failures gracefully
-- Real-world API simulation: Mocking external service integrations
+- Tool API for structured output - tools accept typed parameters from LLM
+- Multi-turn tool calling - agent decides which tools to call
+- Sequential execution - tools are called in the order the LLM decides
+- Real-world API simulation - Mocking external service integrations
+
+Key Learning Goals:
+- Tool API with bind_tools() for reliable tool calling
+- Multi-turn conversations with tool execution
+- Agent-driven workflow planning
 
 The agent uses 4 mock tools:
-- send_email: Send emails to recipients
-- create_calendar_event: Schedule meetings
-- create_task: Assign tasks to team members
 - search_contacts: Find people in the contact database
+- create_calendar_event: Schedule meetings
+- send_email: Send emails to recipients
+- create_task: Assign tasks to team members
 """
 
-import hashlib
+import asyncio
 import json
 import os
-import re
 import sys
 from datetime import datetime
-from enum import Enum
-from typing import Annotated, Any, Sequence
 
-import operator
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
-from langchain_core.tools import tool
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
-from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field
-
-
-# ============================================================================
-# Data Models
-# ============================================================================
-
-
-class StepType(str, Enum):
-    """Types of workflow steps."""
-    SEARCH_CONTACTS = "search_contacts"
-    CREATE_EVENT = "create_calendar_event"
-    SEND_EMAIL = "send_email"
-    CREATE_TASK = "create_task"
-
-
-class Contact(BaseModel):
-    """Contact information."""
-    name: str = Field(description="Full name")
-    email: str = Field(description="Email address")
-    phone: str | None = Field(default=None, description="Phone number")
-    department: str | None = Field(default=None, description="Department")
-
-
-class WorkflowStep(BaseModel):
-    """Individual step in decomposed workflow."""
-    step_type: StepType
-    description: str
-    parameters: dict[str, Any]
-    optional: bool = False
-
-
-class ExecutionResult(BaseModel):
-    """Result of tool execution."""
-    step_id: str
-    tool_name: str
-    success: bool
-    result: str | None = None
-    error: str | None = None
-    timestamp: str
 
 
 # ============================================================================
 # Mock Contact Database
 # ============================================================================
 
-
 CONTACTS = [
-    Contact(name="Alice Johnson", email="alice.johnson@company.com", phone="555-0101", department="Engineering"),
-    Contact(name="Bob Smith", email="bob.smith@company.com", phone="555-0102", department="Product"),
-    Contact(name="Carol Williams", email="carol.williams@company.com", phone="555-0103", department="Marketing"),
-    Contact(name="David Brown", email="david.brown@company.com", phone="555-0104", department="Engineering"),
-    Contact(name="Eva Martinez", email="eva.martinez@company.com", phone="555-0105", department="Sales"),
+    {"name": "Alice Johnson", "email": "alice.johnson@company.com"},
+    {"name": "Bob Smith", "email": "bob.smith@company.com"},
+    {"name": "Carol Williams", "email": "carol.williams@company.com"},
+    {"name": "David Brown", "email": "david.brown@company.com"},
 ]
 
 
 # ============================================================================
-# Mock Tools
+# Tool API - Workflow Tools
 # ============================================================================
 
-
-@tool
-def send_email(to: list[str], subject: str, body: str) -> str:
-    """Send an email to specified recipients.
+def search_contacts(query: str) -> str:
+    """Search for people by name or email in the contact directory.
 
     Args:
-        to: List of email addresses
-        subject: Email subject line
-        body: Email body content
+        query: The person's name or email to search for
 
     Returns:
-        Confirmation message with email ID
+        Found contacts as JSON string
     """
-    email_hash = hashlib.sha256(''.join(to + [subject, body]).encode()).hexdigest()[:8]
-    email_id = f"EMAIL-{int(email_hash, 16) % 10000:04d}"
-    return f"✓ Email sent (ID: {email_id}) to {len(to)} recipient(s)"
+    query_lower = query.lower()
+    found = [
+        c for c in CONTACTS
+        if query_lower in c["name"].lower() or query_lower in c["email"].lower()
+    ]
+
+    if not found:
+        return f"No contacts found matching '{query}'"
+    else:
+        emails = [c["email"] for c in found]
+        return f"Found contacts: {', '.join(emails)}"
 
 
-@tool
-def create_calendar_event(title: str, date: str, attendees: list[str]) -> str:
-    """Create a calendar event.
+def create_calendar_event(title: str, date: str = "") -> str:
+    """Schedule a calendar event/meeting.
 
     Args:
-        title: Event title
-        date: Event date (YYYY-MM-DD format)
-        attendees: List of attendee names or emails
+        title: Meeting title
+        date: Meeting date (e.g., 'next Tuesday', '2024-03-15')
 
     Returns:
-        Confirmation message with event ID
+        Confirmation message
     """
-    event_hash = hashlib.sha256((title + date + ','.join(attendees)).encode()).hexdigest()[:8]
-    event_id = f"EVT-{int(event_hash, 16) % 10000:04d}"
-    return f"✓ Calendar event created (ID: {event_id}): '{title}' on {date} with {len(attendees)} attendee(s)"
+    date_str = date if date else "TBD"
+    return f"✓ Calendar event created: '{title}' on {date_str}"
 
 
-@tool
-def create_task(title: str, assignee: str, context: str, due_date: str) -> str:
-    """Create a task for a team member.
+def send_email(subject: str, recipients: str = "") -> str:
+    """Send an email to recipients.
+
+    Args:
+        subject: Email subject
+        recipients: Email addresses (comma-separated)
+
+    Returns:
+        Confirmation message
+    """
+    recipients_str = recipients if recipients else "recipients"
+    return f"✓ Email sent: '{subject}' to {recipients_str}"
+
+
+def create_task(title: str, assignee: str = "", due_date: str = "") -> str:
+    """Create a task for someone.
 
     Args:
         title: Task title
-        assignee: Name or email of the assignee
-        context: Additional context or description
-        due_date: Due date (YYYY-MM-DD format)
+        assignee: Person assigned to the task
+        due_date: Due date (e.g., 'Friday', '2024-03-15')
 
     Returns:
-        Confirmation message with task ID
+        Confirmation message
     """
-    task_hash = hashlib.sha256((title + assignee + context + due_date).encode()).hexdigest()[:8]
-    task_id = f"TSK-{int(task_hash, 16) % 10000:04d}"
-    return f"✓ Task created (ID: {task_id}): '{title}' assigned to {assignee}, due {due_date}"
+    assignee_str = assignee if assignee else "assignee"
+    due_str = due_date if due_date else "due date TBD"
+    return f"✓ Task created: '{title}' assigned to {assignee_str}, due {due_str}"
 
 
-@tool
-def search_contacts(query: str) -> list[dict]:
-    """Search for contacts by name or email.
+# Create tool definitions
+search_contacts_tool = StructuredTool.from_function(
+    func=search_contacts,
+    name="search_contacts",
+    description="Search for people by name or email in the contact directory",
+    args_schema=type("Args", (BaseModel,), {"__annotations__": {"query": str}}),
+)
 
-    Args:
-        query: Search query (name or email)
+create_calendar_event_tool = StructuredTool.from_function(
+    func=create_calendar_event,
+    name="create_calendar_event",
+    description="Schedule a calendar event/meeting",
+    args_schema=type("Args", (BaseModel,), {
+        "__annotations__": {
+            "title": str,
+            "date": str,
+        }
+    }),
+)
 
-    Returns:
-        List of matching contacts as dictionaries
-    """
-    query_lower = query.lower()
-    matches = [
-        contact.model_dump()
-        for contact in CONTACTS
-        if query_lower in contact.name.lower() or query_lower in contact.email.lower()
-    ]
-    return matches
+send_email_tool = StructuredTool.from_function(
+    func=send_email,
+    name="send_email",
+    description="Send an email to recipients",
+    args_schema=type("Args", (BaseModel,), {
+        "__annotations__": {
+            "subject": str,
+            "recipients": str,
+        }
+    }),
+)
 
+create_task_tool = StructuredTool.from_function(
+    func=create_task,
+    name="create_task",
+    description="Create a task for someone",
+    args_schema=type("Args", (BaseModel,), {
+        "__annotations__": {
+            "title": str,
+            "assignee": str,
+            "due_date": str,
+        }
+    }),
+)
 
-WORKFLOW_TOOLS = [send_email, create_calendar_event, create_task, search_contacts]
+WORKFLOW_TOOLS = [
+    search_contacts_tool,
+    create_calendar_event_tool,
+    send_email_tool,
+    create_task_tool,
+]
 
 
 # ============================================================================
-# LangGraph State
+# System Prompt
 # ============================================================================
 
-
-from typing import TypedDict
-
-
-class WorkflowState(TypedDict):
-    """State for workflow automation."""
-    messages: Annotated[Sequence[BaseMessage], operator.add]
-    user_instruction: str
-    decomposition: list[dict]
-    execution_plan: list[dict]
-    execution_results: list[dict]
-    current_step_index: int
-    errors: list[str]
-
-
-# ============================================================================
-# Task Decomposer Prompt
-# ============================================================================
-
-
-TASK_DECOMPOSER_PROMPT = """You are a workflow planning assistant. Break down the user's instruction into specific steps.
+SYSTEM_PROMPT = """You are a workflow automation assistant. Use the available tools to complete the user's requests step by step.
 
 Available tools:
 - search_contacts(query): Find people by name or email
-- create_calendar_event(title, date, attendees): Schedule a meeting
-- send_email(to, subject, body): Send an email
-- create_task(title, assignee, context, due_date): Create a task
+- create_calendar_event(title, date): Schedule a meeting
+- send_email(subject, recipients): Send an email (recipients is comma-separated emails)
+- create_task(title, assignee, due_date): Create a task
 
-Analyze the instruction and return a structured plan with steps in execution order.
+When the user gives you an instruction:
+1. Break it down into the steps needed
+2. Call the appropriate tools in order
+3. Provide a summary of what was done
 
-IMPORTANT: Return ONLY valid JSON. No extra text.
-
-Response format (valid JSON):
-{
-  "steps": [
-    {
-      "step_type": "search_contacts|create_calendar_event|send_email|create_task",
-      "description": "What this step does",
-      "parameters": {"param": "value"}
-    }
-  ]
-}
-
-Notes:
-- For dates like "next Tuesday", calculate the actual date (today is {TODAY})
-- For person names, you MUST search for them first using search_contacts
-- After finding contacts, use their email addresses for subsequent operations
-- For attendees in calendar events, use email addresses from contact search
-- For task assignee, use email addresses from contact search
-"""
-
-
-# ============================================================================
-# JSON Extraction Helper
-# ============================================================================
-
-
-def extract_json_from_response(response: str) -> str:
-    """Extract JSON from a response that may contain extra text."""
-    response = response.strip()
-
-    # Look for JSON block between ```json and ```
-    json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
-    if json_match:
-        return json_match.group(1).strip()
-
-    # Look for JSON block between ``` and ```
-    json_match = re.search(r'```\s*(.*?)\s*```', response, re.DOTALL)
-    if json_match:
-        candidate = json_match.group(1).strip()
-        if candidate.startswith('{'):
-            return candidate
-
-    # Look for { and } as JSON boundaries
-    start = response.find('{')
-    if start != -1:
-        brace_count = 0
-        for i in range(start, len(response)):
-            if response[i] == '{':
-                brace_count += 1
-            elif response[i] == '}':
-                brace_count -= 1
-                if brace_count == 0:
-                    return response[start:i+1]
-
-    return response
-
-
-# ============================================================================
-# Workflow Nodes
-# ============================================================================
-
-
-def task_decomposer_node(state: WorkflowState, config):
-    """Decompose user instruction into workflow steps."""
-    model = config["configurable"]["model"]
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    prompt = TASK_DECOMPOSER_PROMPT.replace("{TODAY}", today)
-    full_prompt = f"{prompt}\n\nUser instruction: {state['user_instruction']}"
-
-    response = model.invoke([HumanMessage(content=full_prompt)])
-
-    # Extract JSON from response
-    decomposition = extract_json_from_response(response.content)
-    try:
-        plan = json.loads(decomposition)
-        steps = plan.get("steps", [])
-    except json.JSONDecodeError:
-        # Fallback: create a simple plan
-        steps = []
-
-    return {
-        "decomposition": steps,
-        "messages": [AIMessage(content=f"Decomposed into {len(steps)} steps")]
-    }
-
-
-def execution_planner_node(state: WorkflowState):
-    """Create execution plan from decomposition."""
-    decomposition = state.get("decomposition", [])
-
-    execution_plan = []
-    for i, step in enumerate(decomposition):
-        execution_plan.append({
-            "index": i,
-            "step_type": step.get("step_type"),
-            "description": step.get("description"),
-            "parameters": step.get("parameters", {}),
-        })
-
-    return {
-        "execution_plan": execution_plan,
-        "current_step_index": 0
-    }
-
-
-def tool_executor_node(state: WorkflowState, config):
-    """Execute current step in the plan."""
-    current_index = state.get("current_step_index", 0)
-    execution_plan = state.get("execution_plan", [])
-
-    if current_index >= len(execution_plan):
-        return {"current_step_index": current_index}
-
-    current_step = execution_plan[current_index]
-    tool_name = current_step.get("step_type")
-    parameters = current_step.get("parameters", {})
-
-    # Find the tool
-    tool_map = {t.name: t for t in WORKFLOW_TOOLS}
-    tool = tool_map.get(tool_name)
-
-    if not tool:
-        return {
-            "errors": state.get("errors", []) + [f"Unknown tool: {tool_name}"],
-            "current_step_index": current_index + 1
-        }
-
-    try:
-        # Execute tool
-        result = tool.invoke(parameters)
-
-        # Handle contact search results - update parameters for next steps
-        if tool_name == "search_contacts":
-            contacts = result if isinstance(result, list) else []
-            # Store found contacts for use in subsequent steps
-            execution_results = state.get("execution_results", [])
-            execution_results.append({
-                "step_id": f"step-{current_index}",
-                "tool_name": tool_name,
-                "success": True,
-                "result": f"Found {len(contacts)} contact(s)",
-                "contacts": contacts,
-                "timestamp": datetime.now().isoformat()
-            })
-            return {
-                "execution_results": execution_results,
-                "current_step_index": current_index + 1
-            }
-
-        execution_result = {
-            "step_id": f"step-{current_index}",
-            "tool_name": tool_name,
-            "success": True,
-            "result": result,
-            "timestamp": datetime.now().isoformat()
-        }
-
-        execution_results = state.get("execution_results", [])
-        return {
-            "execution_results": execution_results + [execution_result],
-            "current_step_index": current_index + 1
-        }
-    except Exception as e:
-        # Try recovery for missing contacts
-        if tool_name == "search_contacts":
-            query = parameters.get("query", "")
-            placeholder = {
-                "name": query,
-                "email": f"{query.lower().replace(' ', '.')}@company.com",
-                "phone": None,
-                "department": "Unknown"
-            }
-            print(f"  ⚠ Contact '{query}' not found, using placeholder")
-
-            execution_result = {
-                "step_id": f"step-{current_index}",
-                "tool_name": tool_name,
-                "success": True,
-                "result": f"[PLACEHOLDER] Created placeholder for '{query}'",
-                "contacts": [placeholder],
-                "timestamp": datetime.now().isoformat()
-            }
-
-            execution_results = state.get("execution_results", [])
-            return {
-                "execution_results": execution_results + [execution_result],
-                "current_step_index": current_index + 1
-            }
-
-        return {
-            "errors": state.get("errors", []) + [str(e)],
-            "current_step_index": current_index + 1
-        }
-
-
-def should_continue_execution(state: WorkflowState) -> str:
-    """Check if there are more steps to execute."""
-    current_index = state.get("current_step_index", 0)
-    execution_plan = state.get("execution_plan", [])
-
-    if current_index >= len(execution_plan):
-        return "end"
-    return "continue"
-
-
-def results_aggregator_node(state: WorkflowState):
-    """Aggregate and format results."""
-    execution_results = state.get("execution_results", [])
-    errors = state.get("errors", [])
-
-    summary = {
-        "total_steps": len(state.get("execution_plan", [])),
-        "completed_steps": len(execution_results),
-        "errors": len(errors),
-        "success": len(errors) == 0
-    }
-
-    return {"messages": [AIMessage(content=f"Execution complete: {summary}")]}
-
-
-def build_workflow_graph(model, tools):
-    """Build the workflow automation graph."""
-    workflow = StateGraph(WorkflowState)
-
-    # Add nodes
-    workflow.add_node("decomposer", lambda state: task_decomposer_node(state, {"configurable": {"model": model}}))
-    workflow.add_node("planner", execution_planner_node)
-    workflow.add_node("executor", lambda state: tool_executor_node(state, {"configurable": {"model": model}}))
-    workflow.add_node("aggregator", results_aggregator_node)
-
-    # Set entry point
-    workflow.set_entry_point("decomposer")
-
-    # Add edges
-    workflow.add_edge("decomposer", "planner")
-    workflow.add_edge("planner", "executor")
-    workflow.add_conditional_edges(
-        "executor",
-        should_continue_execution,
-        {"continue": "executor", "end": "aggregator"}
-    )
-    workflow.add_edge("aggregator", END)
-
-    return workflow.compile()
+For dates like "next Tuesday" or "Friday", use that exact phrase - don't calculate specific dates."""
 
 
 # ============================================================================
 # Provider Configuration
 # ============================================================================
-
 
 PROVIDERS = {
     "openai": ("gpt-4.1-nano", "openai"),
@@ -464,7 +205,7 @@ PROVIDERS = {
 }
 
 
-def create_chat_model(provider: str, model_id: str):
+def create_chat_model(provider: str, model_id: str) -> BaseChatModel:
     """Create the appropriate chat model based on provider."""
     if provider == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
@@ -497,65 +238,70 @@ def create_chat_model(provider: str, model_id: str):
 # Demo Scenarios
 # ============================================================================
 
-
 DEMO_SCENARIOS = [
-    {
-        "name": "Meeting Scheduling with Email",
-        "instruction": "Schedule a meeting with Alice and Bob next Tuesday about Q2 planning, then email them the agenda",
-    },
-    {
-        "name": "Bulk Task Assignment",
-        "instruction": "Create a task for each team member to review the design doc by Friday. Team members: Alice, Carol, and David",
-    },
-    {
-        "name": "Partial Failure Recovery",
-        "instruction": "Schedule a meeting with UnknownPerson and Alice about project kickoff",
-    },
+    "Schedule a meeting with Alice and Bob next Tuesday about Q2 planning",
+    "Create a task for Alice to review the design doc by Friday",
+    "Send an email to Bob about the project update",
+    "Schedule a meeting with Alice for Q2 planning and email her the agenda",
 ]
 
 
-def run_demo(model, provider_name: str, model_id: str):
-    """Run workflow automation demo."""
-    print("=== Python — Workflow Automation Agent ===")
+# ============================================================================
+# Demo Execution
+# ============================================================================
+
+async def run_demo_async(model: BaseChatModel, provider_name: str, model_id: str):
+    """Run workflow automation demo asynchronously."""
+    print("=== Python — Workflow Automation Agent (Tool API) ===")
     print(f"Provider: {provider_name}")
     print(f"Model: {model_id}")
     print()
 
-    graph = build_workflow_graph(model, WORKFLOW_TOOLS)
+    # Bind tools to model
+    model_with_tools = model.bind_tools(WORKFLOW_TOOLS)
 
-    for i, scenario in enumerate(DEMO_SCENARIOS, 1):
-        print(f"[{i}/{len(DEMO_SCENARIOS)}] {scenario['name']}")
-        print(f"Instruction: {scenario['instruction']}")
+    for i, instruction in enumerate(DEMO_SCENARIOS, 1):
+        print(f"[{i}/{len(DEMO_SCENARIOS)}] {instruction}")
         print("-" * 60)
 
-        initial_state = {
-            "messages": [],
-            "user_instruction": scenario['instruction'],
-            "decomposition": [],
-            "execution_plan": [],
-            "execution_results": [],
-            "current_step_index": 0,
-            "errors": [],
-        }
+        messages = [
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=instruction),
+        ]
 
         try:
-            result = graph.invoke(initial_state)
+            # Multi-turn conversation with tool calling
+            for turn in range(5):
+                response = await model_with_tools.ainvoke(messages)
+                messages.append(response)
 
-            print("\n--- Execution Summary ---")
-            print(f"Steps completed: {len(result.get('execution_results', []))}")
-            print(f"Errors: {len(result.get('errors', []))}")
+                # Check if the model wants to call tools
+                if hasattr(response, 'tool_calls') and response.tool_calls:
+                    # Execute all tool calls
+                    for tool_call in response.tool_calls:
+                        tool_name = tool_call.get("name", "")
+                        tool_args = tool_call.get("args", {})
+                        tool_id = tool_call.get("id", "")
 
-            print("\n--- Tool Call Log ---")
-            for exec_result in result.get("execution_results", []):
-                print(f"  [{exec_result['tool_name']}]")
-                print(f"    {exec_result['result']}")
+                        # Find and execute the tool
+                        tool = next((t for t in WORKFLOW_TOOLS if t.name == tool_name), None)
+                        if tool:
+                            result = tool.func(**tool_args)
+                            messages.append(ToolMessage(content=str(result), tool_call_id=tool_id))
+                            print(f"  [{tool_name}]")
+                            print(f"    {result}")
+                        else:
+                            messages.append(ToolMessage(content=f"Error: Tool '{tool_name}' not found", tool_call_id=tool_id))
+                else:
+                    # No tool calls, agent is done
+                    break
 
-            if result.get("errors"):
-                print("\n--- Errors ---")
-                for error in result.get("errors", []):
-                    print(f"  ✗ {error}")
+            # Print final response
+            if messages and hasattr(messages[-1], 'content'):
+                print(f"\nAgent: {messages[-1].content}")
+
         except Exception as e:
-            print(f"\n✗ Error executing workflow: {e}")
+            print(f"\n✗ Error: {e}")
 
         print("=" * 60)
         print()
@@ -565,10 +311,14 @@ def run_demo(model, provider_name: str, model_id: str):
     print(f"  Scenarios processed: {len(DEMO_SCENARIOS)}")
 
 
+def run_demo(model: BaseChatModel, provider_name: str, model_id: str):
+    """Synchronous wrapper for demo."""
+    asyncio.run(run_demo_async(model, provider_name, model_id))
+
+
 # ============================================================================
 # Main
 # ============================================================================
-
 
 def main():
     load_dotenv()

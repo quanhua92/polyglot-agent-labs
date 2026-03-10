@@ -1,12 +1,13 @@
 """
 Polyglot Agent Labs — Use Case 14: Content Writing Agent (Blog Generator)
-A multi-stage content generation pipeline with quality control loops.
+A multi-stage content generation pipeline with quality control loops using Tool API.
 Switch provider with env var LLM_PROVIDER (default: openrouter).
 
 Usage:
   python main.py
 
 Key Learning Goals:
+- Tool API for structured output - tools accept typed parameters from LLM
 - Multi-stage pipelines - chaining specialized agents for content creation
 - Prompt chaining - passing outputs between stages as context
 - Quality control loops - iterative improvement with scoring thresholds
@@ -21,19 +22,22 @@ Pipeline Stages:
 6. Finalizer → Format and save to output.md
 """
 
+import asyncio
 import json
 import os
-import re
 import sys
 from typing import Annotated, Literal, Sequence
 
 import operator
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
+
 
 # ============================================================================
 # Configuration
@@ -49,45 +53,183 @@ DEMO_TOPIC = "Why developers should learn both Python and Rust"
 QUALITY_THRESHOLD = 7
 MAX_REVISIONS = 2
 
+
 # ============================================================================
-# Pydantic Models for Structured Output
+# Pydantic Models for Tool Arguments (Input Schema)
 # ============================================================================
 
 
-class SectionOutline(BaseModel):
-    """Single section outline."""
-    heading: str = Field(description="Section heading")
-    key_points: list[str] = Field(description="2-3 key points for this section")
-
-
-class ArticleOutline(BaseModel):
-    """Full article outline."""
+class ArticleOutlineArgs(BaseModel):
+    """Arguments for submitting article outline."""
     title: str = Field(description="Article title")
-    sections: list[SectionOutline] = Field(description="4-6 sections with key points")
+    sections: list[dict] = Field(description="List of sections with heading and key_points")
 
 
-class SectionResearch(BaseModel):
-    """Research notes for a section."""
-    section_heading: str = Field(description="Matching section heading")
-    talking_points: list[str] = Field(description="3-5 relevant talking points")
+class SectionResearchArgs(BaseModel):
+    """Arguments for submitting section research."""
+    sections: list[dict] = Field(description="List of research for each section")
 
 
-class ArticleResearch(BaseModel):
-    """Complete research for all sections."""
-    sections: list[SectionResearch] = Field(description="Research for each section")
-
-
-class EditorReview(BaseModel):
-    """Editor feedback and scoring."""
+class EditorReviewArgs(BaseModel):
+    """Arguments for submitting editor review."""
     score: int = Field(description="Quality score 1-10", ge=1, le=10)
     feedback: str = Field(description="Specific feedback for improvement")
     grammar_issues: list[str] = Field(default_factory=list, description="Grammar issues found")
     coherence_issues: list[str] = Field(default_factory=list, description="Coherence issues found")
 
+
+# ============================================================================
+# Pydantic Models for Structured Output (Result Types)
+# ============================================================================
+
+
+class ArticleOutline(BaseModel):
+    """Full article outline."""
+    title: str
+    sections: list[dict]
+
+
+class ArticleResearch(BaseModel):
+    """Complete research for all sections."""
+    sections: list[dict]
+
+
+class EditorReview(BaseModel):
+    """Editor feedback and scoring."""
+    score: int
+    feedback: str
+    grammar_issues: list[str]
+    coherence_issues: list[str]
+
+
+# ============================================================================
+# Shared State for Tool Outputs
+# =============================================================================
+
+class ContentResults:
+    """Shared state to store content generation results."""
+    def __init__(self):
+        self.outline: ArticleOutline | None = None
+        self.research: ArticleResearch | None = None
+        self.review: EditorReview | None = None
+
+    def set_outline(self, result: ArticleOutline):
+        self.outline = result
+
+    def set_research(self, result: ArticleResearch):
+        self.research = result
+
+    def set_review(self, result: EditorReview):
+        self.review = result
+
+    def reset_outline(self):
+        self.outline = None
+
+    def reset_research(self):
+        self.research = None
+
+    def reset_review(self):
+        self.review = None
+
+
+# Global results container
+content_results = ContentResults()
+
+
+# ============================================================================
+# Tool API - Content Generation Tools
+# ============================================================================
+
+def submit_outline_tool(
+    title: str,
+    sections: list[dict],
+) -> str:
+    """Submit article outline.
+
+    Args:
+        title: Article title
+        sections: List of sections with heading and key_points
+
+    Returns:
+        Confirmation message
+    """
+    outline = ArticleOutline(title=title, sections=sections)
+    content_results.set_outline(outline)
+    return f"Outline created: {title} with {len(sections)} sections"
+
+
+def submit_research_tool(sections: list[dict]) -> str:
+    """Submit section research.
+
+    Args:
+        sections: List of research for each section
+
+    Returns:
+        Confirmation message
+    """
+    research = ArticleResearch(sections=sections)
+    content_results.set_research(research)
+    return f"Research generated for {len(sections)} sections"
+
+
+def submit_review_tool(
+    score: int,
+    feedback: str,
+    grammar_issues: list[str] | None = None,
+    coherence_issues: list[str] | None = None,
+) -> str:
+    """Submit editor review.
+
+    Args:
+        score: Quality score 1-10
+        feedback: Specific feedback for improvement
+        grammar_issues: Grammar issues found
+        coherence_issues: Coherence issues found
+
+    Returns:
+        Confirmation message
+    """
+    if grammar_issues is None:
+        grammar_issues = []
+    if coherence_issues is None:
+        coherence_issues = []
+
+    review = EditorReview(
+        score=score,
+        feedback=feedback,
+        grammar_issues=grammar_issues,
+        coherence_issues=coherence_issues,
+    )
+    content_results.set_review(review)
+    return f"Review submitted: score {score}/10, {len(grammar_issues)} grammar issues, {len(coherence_issues)} coherence issues"
+
+
+# Create tool definitions
+outline_tool = StructuredTool.from_function(
+    func=submit_outline_tool,
+    name="submit_outline",
+    description="Submit article outline with title and sections",
+    args_schema=ArticleOutlineArgs,
+)
+
+research_tool = StructuredTool.from_function(
+    func=submit_research_tool,
+    name="submit_research",
+    description="Submit research for article sections",
+    args_schema=SectionResearchArgs,
+)
+
+review_tool = StructuredTool.from_function(
+    func=submit_review_tool,
+    name="submit_review",
+    description="Submit editor review with score and feedback",
+    args_schema=EditorReviewArgs,
+)
+
+
 # ============================================================================
 # LangGraph State
 # ============================================================================
-
 
 class WritingState(dict):
     """State for content writing pipeline."""
@@ -101,6 +243,7 @@ class WritingState(dict):
     max_revisions: int
     final_article: str | None
 
+
 # ============================================================================
 # Stage System Prompts
 # ============================================================================
@@ -112,7 +255,9 @@ Your task:
 2. Create 4-6 section headings
 3. Provide 2-3 key points for each section
 
-Focus on: clarity, logical flow, and comprehensive coverage."""
+Focus on: clarity, logical flow, and comprehensive coverage.
+
+IMPORTANT: You MUST use the submit_outline tool to submit your outline."""
 
 RESEARCHER_SYSTEM = """You are a technical researcher. Gather talking points and facts for each section.
 
@@ -120,7 +265,9 @@ For each section heading:
 1. Generate 3-5 relevant talking points
 2. Include specific technical details where applicable
 3. Add examples or comparisons
-4. Ensure factual accuracy"""
+4. Ensure factual accuracy
+
+IMPORTANT: You MUST use the submit_research tool to submit your research."""
 
 DRAFTER_SYSTEM = """You are a technical writer. Write engaging blog prose based on outline and research.
 
@@ -135,7 +282,9 @@ Style guidelines:
 - Use active voice
 - Include relevant examples
 - Avoid jargon unless explained
-- Keep paragraphs focused (3-5 sentences)"""
+- Keep paragraphs focused (3-5 sentences)
+
+Write the full article as markdown."""
 
 EDITOR_SYSTEM = """You are a content editor. Review blog drafts for quality and provide constructive feedback.
 
@@ -146,73 +295,17 @@ Evaluate on:
 4. Content (30%): accuracy, completeness, relevance
 5. Engagement (10%): interest, readability, flow
 
-Provide:
-- Overall score 1-10
-- Specific feedback for improvement
-- List of grammar issues (if any)
-- List of coherence issues (if any)
-
 Scoring rubric:
 - 9-10: Excellent, ready to publish
 - 7-8: Good, minor improvements
 - 5-6: Fair, needs moderate revisions
-- 1-4: Poor, needs major rewrite"""
+- 1-4: Poor, needs major rewrite
 
-FINALIZER_SYSTEM = """You are a final editor. Prepare the article for publication.
-
-Your task:
-1. Apply any final polish
-2. Format as proper markdown
-3. Ensure consistent formatting
-4. Add meta information (title, word count)"""
-
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-
-def extract_json_from_response(response: str) -> str:
-    """Extract JSON from a response that may contain extra text."""
-    response = response.strip()
-
-    # Look for JSON block between ```json and ```
-    json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
-    if json_match:
-        return json_match.group(1).strip()
-
-    # Look for JSON block between ``` and ```
-    json_match = re.search(r'```\s*(.*?)\s*```', response, re.DOTALL)
-    if json_match:
-        candidate = json_match.group(1).strip()
-        if candidate.startswith('{'):
-            return candidate
-
-    # Look for { and } as JSON boundaries
-    start = response.find('{')
-    if start != -1:
-        brace_count = 0
-        for i in range(start, len(response)):
-            if response[i] == '{':
-                brace_count += 1
-            elif response[i] == '}':
-                brace_count -= 1
-                if brace_count == 0:
-                    return response[start:i+1]
-
-    return response
-
-
-def extract_markdown_from_response(response: str) -> str:
-    """Extract markdown from response."""
-    if "```markdown" in response:
-        start = response.find("```markdown") + 11
-        end = response.find("```", start)
-        return response[start:end].strip()
-    elif "```" in response:
-        start = response.find("```") + 3
-        end = response.find("```", start)
-        return response[start:end].strip()
-    return response
+IMPORTANT: You MUST use the submit_review tool to submit your assessment. The tool requires:
+- score: integer 1-10
+- feedback: specific feedback for improvement
+- grammar_issues: array of grammar issues found (empty array if none)
+- coherence_issues: array of coherence issues found (empty array if none)"""
 
 
 # ============================================================================
@@ -220,7 +313,7 @@ def extract_markdown_from_response(response: str) -> str:
 # ============================================================================
 
 
-def create_chat_model(provider: str, model_id: str):
+def create_chat_model(provider: str, model_id: str) -> BaseChatModel:
     """Create the appropriate chat model based on provider."""
     if provider == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
@@ -250,73 +343,130 @@ def create_chat_model(provider: str, model_id: str):
 
 
 # ============================================================================
-# Pipeline Nodes
+# Helper Functions
 # ============================================================================
 
+def extract_markdown_from_response(response: str) -> str:
+    """Extract markdown from response."""
+    if "```markdown" in response:
+        start = response.find("```markdown") + 11
+        end = response.find("```", start)
+        return response[start:end].strip()
+    elif "```" in response:
+        start = response.find("```") + 3
+        end = response.find("```", start)
+        return response[start:end].strip()
+    return response
 
-def outliner_node(state: WritingState, config):
-    """Generate article outline."""
+
+# ============================================================================
+# Tool Calling Helper (for use in LangGraph nodes)
+# ============================================================================
+
+async def call_agent_with_tools(
+    prompt: str,
+    system_prompt: str,
+    model: BaseChatModel,
+    tools: list,
+) -> str:
+    """Call an agent with tools and return the response content."""
+    model_with_tools = model.bind_tools(tools)
+
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=prompt),
+    ]
+
+    for turn in range(5):  # max_turns = 5
+        response = await model_with_tools.ainvoke(messages)
+        messages.append(response)
+
+        if hasattr(response, 'tool_calls') and response.tool_calls:
+            for tool_call in response.tool_calls:
+                tool_name = tool_call.get("name", "")
+                tool_args = tool_call.get("args", {})
+                tool_id = tool_call.get("id", "")
+
+                tool = next((t for t in tools if t.name == tool_name), None)
+                if tool:
+                    result = tool.func(**tool_args)
+                    messages.append(ToolMessage(content=str(result), tool_call_id=tool_id))
+        else:
+            break
+
+    return messages[-1].content if hasattr(messages[-1], 'content') else str(messages[-1])
+
+
+# ============================================================================
+# Pipeline Nodes (LangGraph with Tool API)
+# ============================================================================
+
+async def outliner_node(state: WritingState, config):
+    """Generate article outline using Tool API."""
     model = config["configurable"]["model"]
+
+    # Reset global result
+    content_results.reset_outline()
 
     prompt = f"""Create a comprehensive outline for a blog post on this topic:
 
 Topic: {state['topic']}
 
-{OUTLINER_SYSTEM}
+Create an outline with a catchy title and 4-6 sections, each with 2-3 key points."""
 
-Return valid JSON matching this schema:
-{{
-  "title": "Article title",
-  "sections": [
-    {{
-      "heading": "Section heading",
-      "key_points": ["point 1", "point 2", "point 3"]
-    }}
-  ]
-}}"""
+    await call_agent_with_tools(prompt, OUTLINER_SYSTEM, model, [outline_tool])
+    await asyncio.sleep(2)  # Rate limiting
 
-    response = model.invoke([HumanMessage(content=prompt)])
-    outline_str = extract_json_from_response(response.content)
-    outline = json.loads(outline_str)
-
-    return {
-        "outline": outline,
-        "messages": [AIMessage(content=f"Generated outline with {len(outline.get('sections', []))} sections")]
-    }
+    outline = content_results.outline
+    if outline:
+        return {
+            "outline": {"title": outline.title, "sections": outline.sections},
+            "messages": [AIMessage(content=f"Generated outline with {len(outline.sections)} sections")]
+        }
+    else:
+        return {
+            "outline": {"title": "Untitled", "sections": []},
+            "messages": [AIMessage(content="Failed to generate outline")]
+        }
 
 
-def researcher_node(state: WritingState, config):
-    """Generate research for each section."""
+async def researcher_node(state: WritingState, config):
+    """Generate research for each section using Tool API."""
     model = config["configurable"]["model"]
     outline = state.get("outline", {})
-    sections = outline.get("sections", [])
 
-    all_research = []
-    for section in sections:
-        prompt = f"""Generate talking points for this section:
+    # Reset global result
+    content_results.reset_research()
 
-Section: {section['heading']}
-Key points to cover: {', '.join(section['key_points'])}
+    sections_desc = "\n".join([
+        f"{s['heading']}: {', '.join(s['key_points'])}"
+        for s in outline.get("sections", [])
+    ])
 
-{RESEARCHER_SYSTEM}
+    prompt = f"""Generate talking points for each section:
 
-Return valid JSON:
-{{
-  "section_heading": "{section['heading']}",
-  "talking_points": ["point 1", "point 2", "point 3", "point 4"]
-}}"""
+Sections:
+{sections_desc}
 
-        response = model.invoke([HumanMessage(content=prompt)])
-        research_str = extract_json_from_response(response.content)
-        all_research.append(json.loads(research_str))
+Generate 3-5 relevant talking points for each section."""
 
-    return {
-        "research": {"sections": all_research},
-        "messages": [AIMessage(content=f"Generated research for {len(all_research)} sections")]
-    }
+    await call_agent_with_tools(prompt, RESEARCHER_SYSTEM, model, [research_tool])
+    await asyncio.sleep(2)  # Rate limiting
+
+    research = content_results.research
+    if research:
+        return {
+            "research": {"sections": research.sections},
+            "messages": [AIMessage(content=f"Generated research for {len(research.sections)} sections")]
+        }
+    else:
+        return {
+            "research": {"sections": []},
+            "messages": [AIMessage(content="Failed to generate research")]
+        }
 
 
-def drafter_node(state: WritingState, config):
+async def drafter_node(state: WritingState, config):
     """Write full article draft."""
     model = config["configurable"]["model"]
     outline = state.get("outline", {})
@@ -345,11 +495,13 @@ RESEARCH:
 
 Write the full article as markdown. Each section should be 150-200 words."""
 
-    response = model.invoke([HumanMessage(content=prompt)])
+    response = await model.ainvoke([HumanMessage(content=prompt)])
     draft = response.content
 
     if "```" in draft:
         draft = extract_markdown_from_response(draft)
+
+    await asyncio.sleep(2)  # Rate limiting
 
     return {
         "draft": draft,
@@ -357,34 +509,40 @@ Write the full article as markdown. Each section should be 150-200 words."""
     }
 
 
-def editor_node(state: WritingState, config):
-    """Review draft and provide score/feedback."""
+async def editor_node(state: WritingState, config):
+    """Review draft and provide score/feedback using Tool API."""
     model = config["configurable"]["model"]
     draft = state.get("draft", "")
+
+    # Reset global result
+    content_results.reset_review()
 
     prompt = f"""Review this blog post draft and provide quality assessment:
 
 DRAFT:
 {draft}
 
-{EDITOR_SYSTEM}
+Provide an overall score (1-10), specific feedback, and list any grammar or coherence issues."""
 
-Return valid JSON:
-{{
-  "score": <1-10>,
-  "feedback": "Specific feedback for improvement",
-  "grammar_issues": ["issue 1", "issue 2"],
-  "coherence_issues": ["issue 1", "issue 2"]
-}}"""
+    await call_agent_with_tools(prompt, EDITOR_SYSTEM, model, [review_tool])
+    await asyncio.sleep(2)  # Rate limiting
 
-    response = model.invoke([HumanMessage(content=prompt)])
-    review_str = extract_json_from_response(response.content)
-    review = json.loads(review_str)
-
-    return {
-        "editor_review": review,
-        "messages": [AIMessage(content=f"Editor score: {review.get('score')}/10")]
-    }
+    review = content_results.review
+    if review:
+        return {
+            "editor_review": {
+                "score": review.score,
+                "feedback": review.feedback,
+                "grammar_issues": review.grammar_issues,
+                "coherence_issues": review.coherence_issues,
+            },
+            "messages": [AIMessage(content=f"Editor score: {review.score}/10")]
+        }
+    else:
+        return {
+            "editor_review": {"score": 5, "feedback": "Review failed", "grammar_issues": [], "coherence_issues": []},
+            "messages": [AIMessage(content="Editor review failed")]
+        }
 
 
 def should_revise(state: WritingState) -> Literal["finalize", "revise"]:
@@ -438,17 +596,16 @@ def finalizer_node(state: WritingState, config):
 # Graph Building
 # ============================================================================
 
-
 def build_writing_graph(model):
     """Build the content writing pipeline graph."""
     workflow = StateGraph(WritingState)
 
-    workflow.add_node("outliner", lambda state: outliner_node(state, {"configurable": {"model": model}}))
-    workflow.add_node("researcher", lambda state: researcher_node(state, {"configurable": {"model": model}}))
-    workflow.add_node("drafter", lambda state: drafter_node(state, {"configurable": {"model": model}}))
-    workflow.add_node("editor", lambda state: editor_node(state, {"configurable": {"model": model}}))
+    workflow.add_node("outliner", outliner_node)
+    workflow.add_node("researcher", researcher_node)
+    workflow.add_node("drafter", drafter_node)
+    workflow.add_node("editor", editor_node)
     workflow.add_node("increment", increment_revision)
-    workflow.add_node("finalizer", lambda state: finalizer_node(state, {"configurable": {"model": model}}))
+    workflow.add_node("finalizer", finalizer_node)
 
     workflow.set_entry_point("outliner")
 
@@ -475,10 +632,9 @@ def build_writing_graph(model):
 # Demo Execution
 # ============================================================================
 
-
-def run_demo(model, provider_name: str, model_id: str):
-    """Run content writing demo."""
-    print("=== Python — Content Writing Agent ===")
+async def run_demo_async(model: BaseChatModel, provider_name: str, model_id: str):
+    """Run content writing demo asynchronously."""
+    print("=== Python — Content Writing Agent (Tool API) ===")
     print(f"Provider: {provider_name}")
     print(f"Model: {model_id}")
     print()
@@ -510,7 +666,7 @@ def run_demo(model, provider_name: str, model_id: str):
     final_score = None
 
     # Stream progress
-    for step in graph.stream(initial_state, config):
+    async for step in graph.astream(initial_state, config):
         for node_name, node_output in step.items():
             # Track final state
             final_state = node_output if "__end__" not in step else final_state
@@ -570,10 +726,14 @@ def run_demo(model, provider_name: str, model_id: str):
         print(f"Output: output.md")
 
 
+def run_demo(model: BaseChatModel, provider_name: str, model_id: str):
+    """Synchronous wrapper for demo."""
+    asyncio.run(run_demo_async(model, provider_name, model_id))
+
+
 # ============================================================================
 # Main
 # ============================================================================
-
 
 def main():
     load_dotenv()

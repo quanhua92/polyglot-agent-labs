@@ -4,25 +4,79 @@ Use Case 11: Code Review Agent
 
 Demonstrates an agent that reads source code files, analyzes them,
 and provides structured code review feedback including bugs, style issues,
-security concerns, and improvement suggestions.
+security concerns, and improvement suggestions using Tool API.
 
 Key Learning Goals:
+- Tool API for structured output - tools accept typed parameters from LLM
 - File I/O tools for reading source files
-- Structured output for code review findings
 - Large context handling for code analysis
 - Code analysis prompting techniques
 """
 
+import asyncio
 import json
 import os
-import re
 import sys
+from typing import Literal
 
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 
-load_dotenv()
+
+# =============================================================================
+# Pydantic Models for Tool Arguments (Input Schema)
+# =============================================================================
+
+
+class CodeFinding(BaseModel):
+    """A single code review finding."""
+    severity: str = Field(description="Severity level: critical, high, medium, low")
+    category: str = Field(description="Category: bugs, security, style, best_practices")
+    message: str = Field(description="Clear description of the issue")
+
+
+class SubmitCodeReviewArgs(BaseModel):
+    """Arguments for submitting code review."""
+    summary: str = Field(description="Brief summary of the code quality")
+    overall_score: int = Field(description="Overall score from 0-100", ge=0, le=100)
+    issues: list[str] = Field(description="List of issues found (each as a brief description)")
+    file_count: int = Field(description="Number of files reviewed")
+
+
+# =============================================================================
+# Pydantic Models for Structured Output (Result Types)
+# =============================================================================
+
+
+class CodeReview(BaseModel):
+    """Structured code review output."""
+    summary: str
+    overall_score: int
+    issues: list[str]
+    file_count: int
+
+
+# =============================================================================
+# Shared State for Tool Outputs
+# =============================================================================
+
+class CodeReviewResults:
+    """Shared state to store code review result."""
+    def __init__(self):
+        self.review: CodeReview | None = None
+
+    def set_review(self, result: CodeReview):
+        self.review = result
+
+
+# Global results container
+review_results = CodeReviewResults()
+
 
 # =============================================================================
 # SAMPLE CODE FILES (with intentional issues)
@@ -79,6 +133,7 @@ def add_to_cache(key, value, cache=cache):
     cache[key] = value""",
 }
 
+
 # =============================================================================
 # FINDING CATEGORIES AND SEVERITY LEVELS
 # =============================================================================
@@ -97,72 +152,45 @@ SEVERITY_LEVELS = {
     "low": "Optional - minor issue or nitpick",
 }
 
+
 # =============================================================================
-# FILE I/O TOOLS
+# Tool API - Code Review Tool
 # =============================================================================
 
-
-def list_files(directory: str = ".") -> list[str]:
-    """List all files in a directory.
-
-    Args:
-        directory: Path to the directory to list files from
-
-    Returns:
-        List of file names in the directory
-    """
-    try:
-        if not os.path.exists(directory):
-            return [f"Error: Directory '{directory}' does not exist"]
-
-        files = []
-        for entry in os.listdir(directory):
-            if os.path.isfile(os.path.join(directory, entry)):
-                files.append(entry)
-        return sorted(files)
-    except Exception as e:
-        return [f"Error listing files: {str(e)}"]
-
-
-def read_file(file_path: str) -> str:
-    """Read the contents of a file.
+def submit_code_review_tool(
+    summary: str,
+    overall_score: int,
+    issues: list[str],
+    file_count: int,
+) -> str:
+    """Submit structured code review feedback.
 
     Args:
-        file_path: Path to the file to read
+        summary: Brief summary of the code quality
+        overall_score: Overall score from 0-100
+        issues: List of issues found (each as a brief description)
+        file_count: Number of files reviewed
 
     Returns:
-        The contents of the file as a string
+        Confirmation message with review summary
     """
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-            # Add line numbers for easier reference
-            lines = content.split("\n")
-            numbered_lines = [f"{i + 1:4d} | {line}" for i, line in enumerate(lines)]
-            return "\n".join(numbered_lines)
-    except FileNotFoundError:
-        return f"Error: File not found at '{file_path}'"
-    except Exception as e:
-        return f"Error reading file: {str(e)}"
+    review = CodeReview(
+        summary=summary,
+        overall_score=overall_score,
+        issues=issues,
+        file_count=file_count,
+    )
+    review_results.set_review(review)
+    return f"Code review submitted: score {overall_score}/100, {len(issues)} issues found"
 
 
-def get_sample_file(file_name: str) -> str:
-    """Get a sample code file with intentional issues for review.
-
-    Args:
-        file_name: Name of the sample file (e.g., 'insecure_login.py')
-
-    Returns:
-        The file contents with line numbers
-    """
-    if file_name not in SAMPLE_FILES:
-        available = ", ".join(SAMPLE_FILES.keys())
-        return f"Error: Sample file '{file_name}' not found. Available: {available}"
-
-    content = SAMPLE_FILES[file_name]
-    lines = content.strip().split("\n")
-    numbered_lines = [f"{i + 1:4d} | {line}" for i, line in enumerate(lines)]
-    return "\n".join(numbered_lines)
+# Create tool definition
+code_review_tool = StructuredTool.from_function(
+    func=submit_code_review_tool,
+    name="submit_code_review",
+    description="Submit structured code review feedback with score and issues",
+    args_schema=SubmitCodeReviewArgs,
+)
 
 
 # =============================================================================
@@ -170,13 +198,13 @@ def get_sample_file(file_name: str) -> str:
 # =============================================================================
 
 PROVIDERS = {
-    "openai": ("gpt-4.1-mini", "openai"),
-    "anthropic": ("claude-3-7-haiku-20250221", "anthropic"),
+    "openai": ("gpt-4.1-nano", "openai"),
+    "anthropic": ("claude-3-haiku-20240307", "anthropic"),
     "openrouter": ("stepfun/step-3.5-flash:free", "openrouter"),
 }
 
 
-def create_chat_model(provider: str, model_id: str):
+def create_chat_model(provider: str, model_id: str) -> BaseChatModel:
     """Create the appropriate chat model based on provider."""
     if provider == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
@@ -211,13 +239,12 @@ def create_chat_model(provider: str, model_id: str):
 
 CODE_REVIEWER_PROMPT = """You are an expert code reviewer. Analyze the provided code and give structured feedback.
 
-For each issue found, provide:
-- severity: low, medium, high, or critical
-- category: bugs, security, style, or best_practices
-- line_number: The line where the issue occurs
-- code_snippet: The relevant code snippet
-- message: Clear description of the issue
-- suggestion: Specific recommendation for fixing it
+Provide:
+- A summary of the code quality
+- An overall score from 0-100
+- A list of issues found (each as a brief description)
+
+Focus on: bugs, security issues, style problems, and best practices.
 
 Scoring guidelines:
 - Start at 100
@@ -226,67 +253,68 @@ Scoring guidelines:
 - Medium: -5 points each
 - Low: -2 points each
 
-Provide your response as valid JSON matching this schema:
-{
-  "summary": "Overall assessment",
-  "findings": [
-    {
-      "severity": "level",
-      "category": "type",
-      "line_number": number,
-      "code_snippet": "code",
-      "message": "description",
-      "suggestion": "fix"
-    }
-  ],
-  "overall_score": number,
-  "file_count": number,
-  "lines_reviewed": number
-}"""
+IMPORTANT: You MUST use the submit_code_review tool to submit your assessment."""
 
 
 # =============================================================================
-# JSON EXTRACTION HELPER
+# Tool Calling Helper
 # =============================================================================
 
+async def review_code_with_tools(
+    code_text: str,
+    model: BaseChatModel,
+    max_turns: int = 5,
+) -> CodeReview | None:
+    """Review code using Tool API with multi-turn conversation.
 
-def extract_json_from_response(response: str) -> str:
-    """Extract JSON from a response that may contain extra text."""
-    response = response.strip()
+    Args:
+        code_text: Code to review
+        model: Chat model to use
+        max_turns: Maximum number of conversation turns
 
-    # Look for JSON block between ```json and ```
-    json_match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
-    if json_match:
-        return json_match.group(1).strip()
+    Returns:
+        CodeReview if successful, None otherwise
+    """
+    # Bind tools to model for tool calling support
+    model_with_tools = model.bind_tools([code_review_tool])
 
-    # Look for JSON block between ``` and ```
-    json_match = re.search(r"```\s*(.*?)\s*```", response, re.DOTALL)
-    if json_match:
-        candidate = json_match.group(1).strip()
-        if candidate.startswith("{"):
-            return candidate
+    messages = [
+        SystemMessage(content=CODE_REVIEWER_PROMPT),
+        HumanMessage(content=f"Analyze this code:\n\n{code_text}\n\nUse the submit_code_review tool to submit your review."),
+    ]
 
-    # Look for { and } as JSON boundaries
-    start = response.find("{")
-    if start != -1:
-        brace_count = 0
-        for i in range(start, len(response)):
-            if response[i] == "{":
-                brace_count += 1
-            elif response[i] == "}":
-                brace_count -= 1
-                if brace_count == 0:
-                    return response[start : i + 1]
+    for turn in range(max_turns):
+        response = await model_with_tools.ainvoke(messages)
+        messages.append(response)
 
-    return response
+        # Check if the model wants to call a tool
+        if hasattr(response, 'tool_calls') and response.tool_calls:
+            # Execute all tool calls
+            for tool_call in response.tool_calls:
+                tool_name = tool_call.get("name", "")
+                tool_args = tool_call.get("args", {})
+                tool_id = tool_call.get("id", "")
+
+                if tool_name == "submit_code_review":
+                    try:
+                        result = code_review_tool.func(**tool_args)
+                        messages.append(ToolMessage(content=result, tool_call_id=tool_id))
+                    except Exception as e:
+                        messages.append(ToolMessage(content=f"Error: {str(e)}", tool_call_id=tool_id))
+                else:
+                    messages.append(ToolMessage(content=f"Error: Tool '{tool_name}' not found", tool_call_id=tool_id))
+        else:
+            # No tool calls, review complete
+            break
+
+    return review_results.review
 
 
 # =============================================================================
 # REPORT FORMATTING
 # =============================================================================
 
-
-def print_review_report(review: dict, provider_name: str, model_id: str):
+def print_review_report(review: CodeReview, provider_name: str, model_id: str):
     """Print formatted code review report."""
     print(f"\n{'='*60}")
     print("CODE REVIEW REPORT")
@@ -294,128 +322,77 @@ def print_review_report(review: dict, provider_name: str, model_id: str):
     print(f"Provider: {provider_name}")
     print(f"Model: {model_id}")
     print()
-    print(f"Summary: {review.get('summary', 'No summary')}")
-    print(f"Files Reviewed: {review.get('file_count', 0)}")
-    print(f"Lines Reviewed: {review.get('lines_reviewed', 0)}")
-    print(f"Overall Score: {review.get('overall_score', 0)}/100")
+    print(f"Summary: {review.summary}")
+    print(f"Files Reviewed: {review.file_count}")
+    print(f"Overall Score: {review.overall_score}/100")
     print(f"\n{'─'*60}")
-    print("FINDINGS")
+    print("ISSUES FOUND")
     print(f"{'─'*60}")
 
-    findings = review.get("findings", [])
-    if not findings:
+    if not review.issues:
         print("\n✓ No issues found!")
     else:
-        # Group by severity
-        severity_order = ["critical", "high", "medium", "low"]
-        grouped = {s: [] for s in severity_order}
-        for f in findings:
-            sev = f.get("severity", "low").lower()
-            if sev in grouped:
-                grouped[sev].append(f)
-
-        for severity in severity_order:
-            if grouped[severity]:
-                for i, finding in enumerate(grouped[severity], 1):
-                    category = finding.get("category", "unknown")
-                    line = finding.get("line_number", "?")
-                    msg = finding.get("message", "")
-
-                    print(f"\n[{i}] {severity.upper()} | {category} | Line {line}")
-                    print(f"    {msg}")
-
-                    snippet = finding.get("code_snippet", "")
-                    if snippet:
-                        truncated = snippet[:60] + "..." if len(snippet) > 60 else snippet
-                        print(f"    Code: {truncated}")
-
-                    suggestion = finding.get("suggestion", "")
-                    if suggestion:
-                        print(f"    → {suggestion}")
+        for i, issue in enumerate(review.issues, 1):
+            print(f"\n[{i}] {issue}")
 
     print(f"\n{'='*60}")
-    print(f"Total Issues: {len(findings)}")
+    print(f"Total Issues: {len(review.issues)}")
     print(f"{'='*60}")
-
-
-# =============================================================================
-# CODE REVIEW FUNCTION
-# =============================================================================
-
-
-def review_code(model, code_contents: dict[str, str]) -> dict:
-    """Review code files and return structured findings."""
-    # Format code for review
-    code_text = ""
-    for path, content in code_contents.items():
-        code_text += f"\n{'='*60}\n"
-        code_text += f"FILE: {path}\n"
-        code_text += f"{'='*60}\n"
-        # Add line numbers
-        lines = content.split("\n")
-        numbered = [f"{i+1:4d} | {line}" for i, line in enumerate(lines)]
-        code_text += "\n".join(numbered)
-        code_text += "\n"
-
-    prompt = f"""{CODE_REVIEWER_PROMPT}
-
-CODE TO REVIEW:
-{code_text}
-
-Analyze this code and return valid JSON with the review findings."""
-
-    response = model.invoke(prompt)
-    response_text = response.content if hasattr(response, "content") else str(response)
-
-    # Extract and parse JSON
-    json_str = extract_json_from_response(response_text)
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError as e:
-        print(f"✗ Error parsing review: {e}")
-        print(f"Raw response: {json_str[:500]}...")
-        return {
-            "summary": "Failed to parse review",
-            "findings": [],
-            "overall_score": 0,
-            "file_count": len(code_contents),
-            "lines_reviewed": sum(len(c.split("\n")) for c in code_contents.values()),
-        }
 
 
 # =============================================================================
 # DEMO EXECUTION
 # =============================================================================
 
-
-def run_demo(model, provider_name: str, model_id: str):
-    """Run code review demo."""
-    print("=== Python — Code Review Agent ===")
+async def run_demo_async(model: BaseChatModel, provider_name: str, model_id: str):
+    """Run code review demo asynchronously."""
+    print("=== Python — Code Review Agent (Tool API) ===")
     print(f"Provider: {provider_name}")
     print(f"Model: {model_id}")
     print()
 
-    # Prepare sample code
-    code_contents = {
-        name: content.strip() for name, content in SAMPLE_FILES.items()
-    }
+    # Format code for review
+    code_text = ""
+    for path, content in SAMPLE_FILES.items():
+        code_text += f"\n{'='*60}\n"
+        code_text += f"FILE: {path}\n"
+        code_text += f"{'='*60}\n"
+        # Add line numbers
+        lines = content.strip().split("\n")
+        numbered = [f"{i+1:4d} | {line}" for i, line in enumerate(lines)]
+        code_text += "\n".join(numbered)
+        code_text += "\n"
 
-    # Perform code review
-    review = review_code(model, code_contents)
+    # Reset global result
+    review_results.review = None
 
-    # Print the report
-    print_review_report(review, provider_name, model_id)
+    # Perform code review using Tool API
+    print("Analyzing code...")
+    review = await review_code_with_tools(code_text, model)
 
+    if review:
+        # Print the report
+        print_review_report(review, provider_name, model_id)
+    else:
+        print("\n✗ Error: Code review tool was not called")
+
+
+def run_demo(model: BaseChatModel, provider_name: str, model_id: str):
+    """Synchronous wrapper for demo."""
+    asyncio.run(run_demo_async(model, provider_name, model_id))
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
 
 def main():
     """Main entry point."""
+    load_dotenv()
+
     # Get provider from environment or use default
     provider_key = os.getenv("LLM_PROVIDER", "openrouter")
     model_id, provider_name = PROVIDERS.get(provider_key, PROVIDERS["openrouter"])
-
-    print("=== Use Case 11: Code Review Agent ===")
-    print(f"Using provider: {provider_name} (model: {model_id})")
-    print()
 
     model = create_chat_model(provider_name, model_id)
     run_demo(model, provider_name, model_id)

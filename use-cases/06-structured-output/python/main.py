@@ -1,6 +1,6 @@
 """
 Polyglot Agent Labs — Use Case 06: Structured Output & Data Extraction
-Extract typed, validated data from unstructured text using structured LLM output.
+Extract typed, validated data from unstructured text using Tool API.
 Switch provider with env var LLM_PROVIDER (default: openrouter).
 
 Usage:
@@ -10,53 +10,273 @@ This demo extracts structured data from 3 types of unstructured text:
 - Job listings: title, company, location, salary_range, required_skills, employment_type, description
 - Product reviews: product_name, rating, pros, cons, summary, would_recommend
 - Emails: sender, recipients, subject, action_items, urgency, key_points, deadline
+
+Key Learning Goals:
+- Tool API for structured output - tools accept typed parameters from LLM
+- Multi-turn tool calling for reliable extraction
+- Shared state pattern for storing tool results
 """
 
+import asyncio
 import json
 import os
 import sys
-import re
+import time
+from typing import Optional
 
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
+
 
 # ============================================================================
-# Pydantic Models for Structured Extraction
+# Pydantic Models for Tool Arguments (Input Schema)
 # ============================================================================
 
 
-class JobListing(BaseModel):
-    """Structured data extracted from a job listing."""
+class ExtractJobListingArgs(BaseModel):
+    """Arguments for extracting job listing data."""
     title: str = Field(description="The job title")
     company: str = Field(description="The company name")
     location: str = Field(description="The job location (city, state/country, or remote)")
-    salary_range: str | None = Field(description="Salary range if specified", default=None)
+    salary_range: Optional[str] = Field(default=None, description="Salary range if specified")
     required_skills: list[str] = Field(description="List of required technical skills")
-    employment_type: str | None = Field(description="Employment type (full-time, part-time, contract, etc.)", default=None)
-    description: str | None = Field(description="Brief description of the role", default=None)
+    employment_type: Optional[str] = Field(default=None, description="Employment type (full-time, part-time, contract, etc.)")
+    description: Optional[str] = Field(default=None, description="Brief description of the role")
 
 
-class ProductReview(BaseModel):
-    """Structured data extracted from a product review."""
+class ExtractProductReviewArgs(BaseModel):
+    """Arguments for extracting product review data."""
     product_name: str = Field(description="The name of the product")
     rating: int = Field(description="Numeric rating (1-5 stars)", ge=1, le=5)
     pros: list[str] = Field(description="List of positive aspects mentioned")
     cons: list[str] = Field(description="List of negative aspects mentioned")
     summary: str = Field(description="Brief summary of the reviewer's sentiment")
-    would_recommend: bool | None = Field(description="Whether the reviewer would recommend this product", default=None)
+    would_recommend: Optional[bool] = Field(default=None, description="Whether the reviewer would recommend this product")
 
 
-class EmailInfo(BaseModel):
-    """Structured data extracted from an email."""
+class ExtractEmailInfoArgs(BaseModel):
+    """Arguments for extracting email information."""
     sender: str = Field(description="Email sender name or address")
     recipients: list[str] = Field(description="List of email recipients")
     subject: str = Field(description="Email subject line")
     action_items: list[str] = Field(description="Action items or tasks mentioned in the email")
     urgency: str = Field(description="Urgency level (high, medium, low)")
     key_points: list[str] = Field(description="Key points or information conveyed")
-    deadline: str | None = Field(description="Any deadline mentioned", default=None)
+    deadline: Optional[str] = Field(default=None, description="Any deadline mentioned")
+
+
+# ============================================================================
+# Pydantic Models for Structured Output (Result Types)
+# ============================================================================
+
+
+class JobListing(BaseModel):
+    """Structured data extracted from a job listing."""
+    title: str
+    company: str
+    location: str
+    salary_range: Optional[str] = None
+    required_skills: list[str]
+    employment_type: Optional[str] = None
+    description: Optional[str] = None
+
+
+class ProductReview(BaseModel):
+    """Structured data extracted from a product review."""
+    product_name: str
+    rating: int
+    pros: list[str]
+    cons: list[str]
+    summary: str
+    would_recommend: Optional[bool] = None
+
+
+class EmailInfo(BaseModel):
+    """Structured data extracted from an email."""
+    sender: str
+    recipients: list[str]
+    subject: str
+    action_items: list[str]
+    urgency: str
+    key_points: list[str]
+    deadline: Optional[str] = None
+
+
+# ============================================================================
+# Shared State for Tool Outputs
+# ============================================================================
+
+class ExtractionResults:
+    """Shared state to store tool results (equivalent to Arc<Mutex<Option<T>>> in Rust)."""
+    def __init__(self):
+        self.job_listing: Optional[JobListing] = None
+        self.product_review: Optional[ProductReview] = None
+        self.email_info: Optional[EmailInfo] = None
+
+    def set_job_listing(self, result: JobListing):
+        self.job_listing = result
+
+    def set_product_review(self, result: ProductReview):
+        self.product_review = result
+
+    def set_email_info(self, result: EmailInfo):
+        self.email_info = result
+
+
+# Global results container
+results = ExtractionResults()
+
+
+# ============================================================================
+# Tool API - Structured Output Tools
+# ============================================================================
+
+def extract_job_listing_tool(
+    title: str,
+    company: str,
+    location: str,
+    salary_range: Optional[str] = None,
+    required_skills: list[str] = None,
+    employment_type: Optional[str] = None,
+    description: Optional[str] = None,
+) -> str:
+    """Extract structured job listing data from unstructured text.
+
+    Args:
+        title: The job title
+        company: The company name
+        location: The job location (city, state/country, or remote)
+        salary_range: Salary range if specified
+        required_skills: List of required technical skills
+        employment_type: Employment type (full-time, part-time, contract, etc.)
+        description: Brief description of the role
+
+    Returns:
+        Confirmation message with extracted data summary
+    """
+    if required_skills is None:
+        required_skills = []
+
+    listing = JobListing(
+        title=title,
+        company=company,
+        location=location,
+        salary_range=salary_range,
+        required_skills=required_skills,
+        employment_type=employment_type,
+        description=description,
+    )
+    results.set_job_listing(listing)
+    return f"Extracted: {title} at {company}"
+
+
+def extract_product_review_tool(
+    product_name: str,
+    rating: int,
+    pros: list[str] = None,
+    cons: list[str] = None,
+    summary: str = "",
+    would_recommend: Optional[bool] = None,
+) -> str:
+    """Extract structured product review data from unstructured text.
+
+    Args:
+        product_name: The name of the product
+        rating: Numeric rating (1-5 stars)
+        pros: List of positive aspects mentioned
+        cons: List of negative aspects mentioned
+        summary: Brief summary of the reviewer's sentiment
+        would_recommend: Whether the reviewer would recommend this product
+
+    Returns:
+        Confirmation message with extracted data summary
+    """
+    if pros is None:
+        pros = []
+    if cons is None:
+        cons = []
+
+    review = ProductReview(
+        product_name=product_name,
+        rating=rating,
+        pros=pros,
+        cons=cons,
+        summary=summary,
+        would_recommend=would_recommend,
+    )
+    results.set_product_review(review)
+    return f"Extracted review for {product_name} - {rating}/5"
+
+
+def extract_email_info_tool(
+    sender: str,
+    recipients: list[str] = None,
+    subject: str = "",
+    action_items: list[str] = None,
+    urgency: str = "",
+    key_points: list[str] = None,
+    deadline: Optional[str] = None,
+) -> str:
+    """Extract structured email information from unstructured text.
+
+    Args:
+        sender: Email sender name or address
+        recipients: List of email recipients
+        subject: Email subject line
+        action_items: Action items or tasks mentioned in the email
+        urgency: Urgency level (high, medium, low)
+        key_points: Key points or information conveyed
+        deadline: Any deadline mentioned
+
+    Returns:
+        Confirmation message with extracted data summary
+    """
+    if recipients is None:
+        recipients = []
+    if action_items is None:
+        action_items = []
+    if key_points is None:
+        key_points = []
+
+    info = EmailInfo(
+        sender=sender,
+        recipients=recipients,
+        subject=subject,
+        action_items=action_items,
+        urgency=urgency,
+        key_points=key_points,
+        deadline=deadline,
+    )
+    results.set_email_info(info)
+    return f"Extracted email from {sender} - urgency: {urgency}"
+
+
+# Create tool definitions
+job_listing_tool = StructuredTool.from_function(
+    func=extract_job_listing_tool,
+    name="extract_job_listing",
+    description="Extract structured job listing data from unstructured text",
+    args_schema=ExtractJobListingArgs,
+)
+
+product_review_tool = StructuredTool.from_function(
+    func=extract_product_review_tool,
+    name="extract_product_review",
+    description="Extract structured product review data from unstructured text",
+    args_schema=ExtractProductReviewArgs,
+)
+
+email_info_tool = StructuredTool.from_function(
+    func=extract_email_info_tool,
+    name="extract_email_info",
+    description="Extract structured email information from unstructured text",
+    args_schema=ExtractEmailInfoArgs,
+)
 
 
 # ============================================================================
@@ -138,6 +358,71 @@ Thanks,
 Sarah
 """
 
+
+# ============================================================================
+# Agent Execution with Tool Calling
+# ============================================================================
+
+async def extract_with_tools(
+    text: str,
+    model: BaseChatModel,
+    tools: list,
+    system_prompt: str,
+    max_turns: int = 5,
+) -> bool:
+    """Run extraction using tools with multi-turn conversation.
+
+    Args:
+        text: Input text to extract from
+        model: Chat model to use
+        tools: List of tools available to the agent
+        system_prompt: System prompt for the agent
+        max_turns: Maximum number of conversation turns
+
+    Returns:
+        True if extraction was successful, False otherwise
+    """
+    # Bind tools to model for tool calling support
+    model_with_tools = model.bind_tools(tools)
+
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=f"Extract structured data from this text:\n\n{text}"),
+    ]
+
+    for turn in range(max_turns):
+        response = await model_with_tools.ainvoke(messages)
+
+        # Check if the model wants to call a tool
+        if hasattr(response, 'tool_calls') and response.tool_calls:
+            messages.append(response)
+
+            # Execute all tool calls
+            for tool_call in response.tool_calls:
+                tool_name = tool_call.get("name", "")
+                tool_args = tool_call.get("args", {})
+                tool_id = tool_call.get("id", "")
+
+                # Find and execute the tool
+                tool = next((t for t in tools if t.name == tool_name), None)
+                if tool:
+                    try:
+                        result = tool.func(**tool_args)
+                        messages.append(ToolMessage(content=result, tool_call_id=tool_id))
+                    except Exception as e:
+                        messages.append(ToolMessage(content=f"Error: {str(e)}", tool_call_id=tool_id))
+                else:
+                    messages.append(ToolMessage(content=f"Error: Tool '{tool_name}' not found", tool_call_id=tool_id))
+
+            # Continue conversation to get final response
+            continue
+        else:
+            # No tool calls, extraction complete
+            return True
+
+    return True
+
+
 # ============================================================================
 # Provider Configuration
 # ============================================================================
@@ -149,218 +434,46 @@ PROVIDERS = {
 }
 
 
-def create_chat_model(provider: str, model_id: str):
+def create_chat_model(provider: str, model_id: str) -> BaseChatModel:
     """Create the appropriate chat model based on provider."""
     if provider == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             print("✗ OPENAI_API_KEY not set")
             sys.exit(1)
-        # Use JSON mode for OpenAI
-        return ChatOpenAI(
-            model=model_id,
-            api_key=api_key,
-            model_kwargs={"response_format": {"type": "json_object"}},
-        )
+        return ChatOpenAI(model=model_id, api_key=api_key, temperature=0)
+
     elif provider == "anthropic":
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
             print("✗ ANTHROPIC_API_KEY not set")
             sys.exit(1)
-        # Anthropic doesn't have native JSON mode, use prompt engineering
-        return ChatAnthropic(model=model_id, api_key=api_key)
+        return ChatAnthropic(model=model_id, api_key=api_key, temperature=0)
+
     elif provider == "openrouter":
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
             print("✗ OPENROUTER_API_KEY not set")
             sys.exit(1)
-        # Use JSON mode for OpenRouter
         return ChatOpenAI(
             model=model_id,
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1",
-            model_kwargs={"response_format": {"type": "json_object"}},
+            temperature=0,
         )
+
     else:
         print(f"✗ Unknown provider type: '{provider}'")
         sys.exit(1)
 
 
 # ============================================================================
-# JSON Extraction Helper
-# ============================================================================
-
-def extract_json_from_response(response: str) -> str:
-    """Extract JSON from a response that may contain extra text."""
-    response = response.strip()
-
-    # Look for JSON block between ```json and ```
-    json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
-    if json_match:
-        return json_match.group(1).strip()
-
-    # Look for JSON block between ``` and ```
-    json_match = re.search(r'```\s*(.*?)\s*```', response, re.DOTALL)
-    if json_match:
-        candidate = json_match.group(1).strip()
-        # Verify it looks like JSON
-        if candidate.startswith('{'):
-            return candidate
-
-    # Look for { and } as JSON boundaries
-    start = response.find('{')
-    if start != -1:
-        # Find the matching closing brace
-        brace_count = 0
-        for i in range(start, len(response)):
-            if response[i] == '{':
-                brace_count += 1
-            elif response[i] == '}':
-                brace_count -= 1
-                if brace_count == 0:
-                    return response[start:i+1]
-
-    # Return as-is if no JSON markers found
-    return response
-
-
-# ============================================================================
-# Extraction Functions
-# ============================================================================
-
-def extract_job_listing(text: str, model) -> JobListing:
-    """Extract structured job listing data."""
-    schema = """
-{
-  "title": "string - The job title",
-  "company": "string - The company name",
-  "location": "string - The job location (city, state/country, or remote)",
-  "salary_range": "string or null - Salary range if specified",
-  "required_skills": ["string"] - List of required technical skills",
-  "employment_type": "string or null - Employment type (full-time, part-time, contract, etc.)",
-  "description": "string or null - Brief description of the role"
-}"""
-
-    prompt = f"""Extract structured data from the following job listing. Return ONLY valid JSON matching this schema:
-
-{schema}
-
-Job listing:
-{text}"""
-
-    response = model.invoke(prompt)
-    content = response.content if hasattr(response, 'content') else str(response)
-    json_str = extract_json_from_response(content)
-    return JobListing.model_validate_json(json_str)
-
-
-def extract_product_review(text: str, model) -> ProductReview:
-    """Extract structured product review data."""
-    schema = """
-{
-  "product_name": "string - The name of the product",
-  "rating": integer (1-5) - Numeric rating",
-  "pros": ["string"] - List of positive aspects mentioned",
-  "cons": ["string"] - List of negative aspects mentioned",
-  "summary": "string - Brief summary of the reviewer's sentiment",
-  "would_recommend": boolean or null - Whether the reviewer would recommend this product
-}"""
-
-    prompt = f"""Extract structured data from the following product review. Return ONLY valid JSON matching this schema:
-
-{schema}
-
-Product review:
-{text}"""
-
-    response = model.invoke(prompt)
-    content = response.content if hasattr(response, 'content') else str(response)
-    json_str = extract_json_from_response(content)
-    return ProductReview.model_validate_json(json_str)
-
-
-def extract_email_info(text: str, model) -> EmailInfo:
-    """Extract structured email information."""
-    schema = """
-{
-  "sender": "string - Email sender name or address",
-  "recipients": ["string"] - List of email recipients",
-  "subject": "string - Email subject line",
-  "action_items": ["string"] - Action items or tasks mentioned in the email",
-  "urgency": "string - Urgency level (high, medium, low)",
-  "key_points": ["string"] - Key points or information conveyed",
-  "deadline": "string or null - Any deadline mentioned"
-}"""
-
-    prompt = f"""Extract structured data from the following email. Return ONLY valid JSON matching this schema:
-
-{schema}
-
-Email:
-{text}"""
-
-    response = model.invoke(prompt)
-    content = response.content if hasattr(response, 'content') else str(response)
-    json_str = extract_json_from_response(content)
-    return EmailInfo.model_validate_json(json_str)
-
-
-# ============================================================================
-# Validation and Retry Logic
-# ============================================================================
-
-def validate_extraction(result: BaseModel, model_class: type[BaseModel]) -> bool:
-    """Validate that required fields are populated."""
-    # Check that required string fields are not empty
-    for field_name, field_info in model_class.model_fields.items():
-        if field_info.is_required():
-            value = getattr(result, field_name)
-            if isinstance(value, str) and not value.strip():
-                print(f"  ✗ Validation failed: {field_name} is empty")
-                return False
-            if isinstance(value, list) and len(value) == 0:
-                print(f"  ✗ Validation failed: {field_name} list is empty")
-                return False
-    return True
-
-
-def extract_with_retry(text: str, model, ModelClass, extract_fn, max_retries: int = 2):
-    """Extract with retry logic for malformed output."""
-    for attempt in range(max_retries + 1):
-        try:
-            result = extract_fn(text, model)
-            if validate_extraction(result, ModelClass):
-                return result
-            else:
-                if attempt < max_retries:
-                    print(f"  ⚠ Validation failed, retrying... (attempt {attempt + 1}/{max_retries})")
-                else:
-                    print(f"  ✗ Validation failed after {max_retries} retries")
-                    return result
-        except ValidationError as e:
-            if attempt < max_retries:
-                print(f"  ⚠ Validation error: {e}")
-                print(f"  ⚠ Retrying... (attempt {attempt + 1}/{max_retries})")
-            else:
-                print(f"  ✗ Validation error after {max_retries} retries: {e}")
-                raise
-        except Exception as e:
-            if attempt < max_retries:
-                print(f"  ⚠ Extraction error: {e}")
-                print(f"  ⚠ Retrying... (attempt {attempt + 1}/{max_retries})")
-            else:
-                print(f"  ✗ Extraction failed after {max_retries} retries: {e}")
-                raise
-    return None
-
-
-# ============================================================================
 # Demo Execution
 # ============================================================================
 
-def run_demo(model, provider_key: str, model_id: str) -> tuple[int, int]:
-    """Run the structured extraction demo."""
-    print("=== Python — Structured Output & Data Extraction ===")
+async def run_demo(model: BaseChatModel, provider_key: str, model_id: str) -> tuple[int, int]:
+    """Run the structured extraction demo using Tool API."""
+    print("=== Python — Structured Output & Data Extraction (Tool API) ===")
     print(f"Provider: {provider_key}")
     print(f"Model: {model_id}")
     print()
@@ -376,14 +489,36 @@ def run_demo(model, provider_key: str, model_id: str) -> tuple[int, int]:
     print(f"Input: {SAMPLE_JOB_LISTING[:100]}...")
     print()
 
+    results.job_listing = None  # Reset
+    job_system_prompt = """You are an expert data extractor. Extract structured job listing data from the provided text.
+
+IMPORTANT: You MUST use the extract_job_listing tool to submit your extraction.
+
+Fields to extract:
+- title: The job title
+- company: The company name
+- location: The job location
+- salary_range: Salary range if specified
+- required_skills: List of required skills
+- employment_type: Employment type if specified
+- description: Brief description of the role"""
+
     try:
-        result = extract_with_retry(SAMPLE_JOB_LISTING, model, JobListing, extract_job_listing)
-        if result:
+        success = await extract_with_tools(
+            SAMPLE_JOB_LISTING,
+            model,
+            [job_listing_tool],
+            job_system_prompt,
+            max_turns=5,
+        )
+        if success and results.job_listing:
             print("\nExtracted Data:")
-            print(result.model_dump_json(indent=2))
+            print(results.job_listing.model_dump_json(indent=2))
             print(f"\nValidation: ✓ All required fields present")
             success_count += 1
+            time.sleep(2)  # Rate limiting
         else:
+            print("\n✗ Error: Tool was not called")
             failure_count += 1
     except Exception as e:
         print(f"\n✗ Extraction failed: {e}")
@@ -400,14 +535,35 @@ def run_demo(model, provider_key: str, model_id: str) -> tuple[int, int]:
     print(f"Input: {SAMPLE_PRODUCT_REVIEW[:100]}...")
     print()
 
+    results.product_review = None  # Reset
+    review_system_prompt = """You are an expert data extractor. Extract structured product review data from the provided text.
+
+IMPORTANT: You MUST use the extract_product_review tool to submit your extraction.
+
+Fields to extract:
+- product_name: The name of the product
+- rating: Numeric rating (1-5 stars)
+- pros: List of positive aspects mentioned
+- cons: List of negative aspects mentioned
+- summary: Brief summary of the reviewer's sentiment
+- would_recommend: Whether reviewer recommends the product (if mentioned)"""
+
     try:
-        result = extract_with_retry(SAMPLE_PRODUCT_REVIEW, model, ProductReview, extract_product_review)
-        if result:
+        success = await extract_with_tools(
+            SAMPLE_PRODUCT_REVIEW,
+            model,
+            [product_review_tool],
+            review_system_prompt,
+            max_turns=5,
+        )
+        if success and results.product_review:
             print("\nExtracted Data:")
-            print(result.model_dump_json(indent=2))
+            print(results.product_review.model_dump_json(indent=2))
             print(f"\nValidation: ✓ All required fields present")
             success_count += 1
+            time.sleep(2)  # Rate limiting
         else:
+            print("\n✗ Error: Tool was not called")
             failure_count += 1
     except Exception as e:
         print(f"\n✗ Extraction failed: {e}")
@@ -424,14 +580,35 @@ def run_demo(model, provider_key: str, model_id: str) -> tuple[int, int]:
     print(f"Input: {SAMPLE_EMAIL[:100]}...")
     print()
 
+    results.email_info = None  # Reset
+    email_system_prompt = """You are an expert data extractor. Extract structured email information from the provided text.
+
+IMPORTANT: You MUST use the extract_email_info tool to submit your extraction.
+
+Fields to extract:
+- sender: Email sender
+- recipients: List of email recipients
+- subject: Email subject line
+- action_items: Action items or tasks mentioned (as strings)
+- urgency: Urgency level (high, medium, low)
+- key_points: Key points from the email
+- deadline: Deadline if mentioned"""
+
     try:
-        result = extract_with_retry(SAMPLE_EMAIL, model, EmailInfo, extract_email_info)
-        if result:
+        success = await extract_with_tools(
+            SAMPLE_EMAIL,
+            model,
+            [email_info_tool],
+            email_system_prompt,
+            max_turns=5,
+        )
+        if success and results.email_info:
             print("\nExtracted Data:")
-            print(result.model_dump_json(indent=2))
+            print(results.email_info.model_dump_json(indent=2))
             print(f"\nValidation: ✓ All required fields present")
             success_count += 1
         else:
+            print("\n✗ Error: Tool was not called")
             failure_count += 1
     except Exception as e:
         print(f"\n✗ Extraction failed: {e}")
@@ -453,7 +630,7 @@ def run_demo(model, provider_key: str, model_id: str) -> tuple[int, int]:
 # Main
 # ============================================================================
 
-def main():
+async def main_async():
     load_dotenv()
 
     provider_key = os.getenv("LLM_PROVIDER", "openrouter").lower()
@@ -466,7 +643,11 @@ def main():
     model_id, provider_type = PROVIDERS[provider_key]
     model = create_chat_model(provider_type, model_id)
 
-    run_demo(model, provider_key, model_id)
+    await run_demo(model, provider_key, model_id)
+
+
+def main():
+    asyncio.run(main_async())
 
 
 if __name__ == "__main__":

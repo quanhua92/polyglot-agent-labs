@@ -11,11 +11,17 @@ Usage:
 
 Commands:
   /quit, /exit, /q    Exit the session (interactive mode only)
+
+Key Learning Goals:
+- Tool API for structured output - tools accept typed parameters from LLM
+- RAG (Retrieval Augmented Generation) for knowledge base queries
+- LangGraph for multi-step agent workflows
+- Escalation logic for handling edge cases
 """
 
+import asyncio
 import json
 import os
-import re
 import sys
 from typing import Annotated, Literal, Sequence
 
@@ -24,19 +30,22 @@ from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.graph import END, StateGraph
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
+
 
 # ============================================================================
-# Pydantic Models for Structured Output
+# Pydantic Models for Tool Arguments (Input Schema)
 # ============================================================================
 
 
-class IntentClassification(BaseModel):
-    """Structured output from intent classification."""
+class SubmitIntentArgs(BaseModel):
+    """Arguments for submitting intent classification."""
     intent: str = Field(
         description="Classified intent: billing, shipping, returns, account, general, escalate"
     )
@@ -55,12 +64,85 @@ class IntentClassification(BaseModel):
     )
 
 
+# ============================================================================
+# Pydantic Models for Structured Output (Result Types)
+# ============================================================================
+
+
+class IntentClassification(BaseModel):
+    """Structured output from intent classification."""
+    intent: str
+    confidence: float
+    entities: dict[str, str]
+    urgency: str
+
+
 class SupportResponse(BaseModel):
     """Structured output from response generator."""
-    response: str = Field(description="The helpful response to the customer")
-    sources: list[str] = Field(default_factory=list, description="KB articles cited")
-    escalation_reason: str | None = Field(default=None, description="Reason if escalating")
-    should_escalate: bool = Field(default=False, description="Whether to escalate to human")
+    response: str
+    sources: list[str]
+    escalation_reason: str | None
+    should_escalate: bool
+
+
+# ============================================================================
+# Shared State for Tool Outputs
+# ============================================================================
+
+class IntentResults:
+    """Shared state to store intent classification result."""
+    def __init__(self):
+        self.classification: IntentClassification | None = None
+
+    def set_classification(self, result: IntentClassification):
+        self.classification = result
+
+
+# Global results container
+intent_results = IntentResults()
+
+
+# ============================================================================
+# Tool API - Intent Classification Tool
+# ============================================================================
+
+def submit_intent_tool(
+    intent: str,
+    confidence: float,
+    entities: dict[str, str] | None = None,
+    urgency: str = "medium",
+) -> str:
+    """Submit intent classification for customer message.
+
+    Args:
+        intent: Classified intent (billing, shipping, returns, account, general, escalate)
+        confidence: Confidence score from 0.0 to 1.0
+        entities: Extracted entities like order_id, email, product_name
+        urgency: Urgency level (low, medium, high)
+
+    Returns:
+        Confirmation message with classification summary
+    """
+    if entities is None:
+        entities = {}
+
+    classification = IntentClassification(
+        intent=intent,
+        confidence=confidence,
+        entities=entities,
+        urgency=urgency,
+    )
+    intent_results.set_classification(classification)
+    return f"Intent classified: {intent} (confidence: {confidence:.2f})"
+
+
+# Create tool definition
+intent_tool = StructuredTool.from_function(
+    func=submit_intent_tool,
+    name="submit_intent",
+    description="Submit intent classification for customer message",
+    args_schema=SubmitIntentArgs,
+)
 
 
 # ============================================================================
@@ -277,7 +359,7 @@ Analyze the customer's message and classify it into one of these intents:
 
 Extract relevant entities (order_id, email, product_name, etc.)
 
-Return structured output with intent, confidence (0.0-1.0), entities, and urgency (low/medium/high)."""
+IMPORTANT: You MUST use the submit_intent tool to submit your classification."""
 
 RESPONSE_GENERATOR_PROMPT = """You are a helpful customer support agent.
 
@@ -298,7 +380,7 @@ ESCALATION_CONFIDENCE_THRESHOLD = 0.6
 # LLM Model Creation
 # ============================================================================
 
-def create_chat_model(provider: str, model_id: str):
+def create_chat_model(provider: str, model_id: str) -> BaseChatModel:
     """Create the appropriate chat model based on provider."""
     if provider == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
@@ -372,41 +454,61 @@ def create_vector_store(embeddings):
 
 
 # ============================================================================
-# JSON Extraction Helper
+# Tool Calling Helper
 # ============================================================================
 
-def extract_json_from_response(response: str) -> str:
-    """Extract JSON from a response that may contain extra text."""
-    response = response.strip()
+async def classify_intent_with_tools(
+    user_input: str,
+    model: BaseChatModel,
+    max_turns: int = 5,
+) -> IntentClassification | None:
+    """Classify intent using Tool API with multi-turn conversation.
 
-    # Look for JSON block between ```json and ```
-    json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
-    if json_match:
-        return json_match.group(1).strip()
+    Args:
+        user_input: Customer message to classify
+        model: Chat model to use
+        max_turns: Maximum number of conversation turns
 
-    # Look for JSON block between ``` and ```
-    json_match = re.search(r'```\s*(.*?)\s*```', response, re.DOTALL)
-    if json_match:
-        candidate = json_match.group(1).strip()
-        # Verify it looks like JSON
-        if candidate.startswith('{'):
-            return candidate
+    Returns:
+        IntentClassification if successful, None otherwise
+    """
+    # Bind tools to model for tool calling support
+    model_with_tools = model.bind_tools([intent_tool])
 
-    # Look for { and } as JSON boundaries
-    start = response.find('{')
-    if start != -1:
-        # Find the matching closing brace
-        brace_count = 0
-        for i in range(start, len(response)):
-            if response[i] == '{':
-                brace_count += 1
-            elif response[i] == '}':
-                brace_count -= 1
-                if brace_count == 0:
-                    return response[start:i+1]
+    messages = [
+        SystemMessage(content=INTENT_CLASSIFIER_PROMPT),
+        HumanMessage(content=f"Classify this customer message:\n\n{user_input}"),
+    ]
 
-    # Return as-is if no JSON markers found
-    return response
+    for turn in range(max_turns):
+        response = await model_with_tools.ainvoke(messages)
+
+        # Check if the model wants to call a tool
+        if hasattr(response, 'tool_calls') and response.tool_calls:
+            messages.append(response)
+
+            # Execute all tool calls
+            for tool_call in response.tool_calls:
+                tool_name = tool_call.get("name", "")
+                tool_args = tool_call.get("args", {})
+                tool_id = tool_call.get("id", "")
+
+                if tool_name == "submit_intent":
+                    try:
+                        result = intent_tool.func(**tool_args)
+                        messages.append(ToolMessage(content=result, tool_call_id=tool_id))
+                    except Exception as e:
+                        messages.append(ToolMessage(content=f"Error: {str(e)}", tool_call_id=tool_id))
+                else:
+                    messages.append(ToolMessage(content=f"Error: Tool '{tool_name}' not found", tool_call_id=tool_id))
+
+            # Continue to get final response
+            continue
+        else:
+            # No tool calls, classification complete
+            break
+
+    return intent_results.classification
 
 
 # ============================================================================
@@ -428,38 +530,25 @@ class SupportState(dict):
     turn_count: int
 
 
-def intent_classifier_node(state: SupportState, config):
-    """Classify user intent using structured output."""
+async def intent_classifier_node(state: SupportState, config):
+    """Classify user intent using Tool API."""
     user_input = state["user_input"]
     model = config["configurable"]["model"]
 
-    prompt = f"""{INTENT_CLASSIFIER_PROMPT}
+    # Reset global result
+    intent_results.classification = None
 
-Customer message: {user_input}
+    # Use Tool API for classification
+    classification = await classify_intent_with_tools(user_input, model)
 
-Return valid JSON with this exact format:
-{{
-  "intent": "category",
-  "confidence": 0.95,
-  "entities": {{"key": "value"}},
-  "urgency": "medium"
-}}
-
-Where intent is one of: billing, shipping, returns, account, general, escalate"""
-
-    response = model.invoke(prompt)
-    content = response.content if hasattr(response, 'content') else str(response)
-    json_str = extract_json_from_response(content)
-
-    try:
-        parsed = json.loads(json_str)
+    if classification:
         return {
-            "intent": parsed.get("intent", "general"),
-            "confidence": float(parsed.get("confidence", 0.8)),
-            "entities": parsed.get("entities", {}),
+            "intent": classification.intent,
+            "confidence": classification.confidence,
+            "entities": classification.entities,
         }
-    except (json.JSONDecodeError, ValueError, TypeError):
-        # Fallback if JSON parsing fails
+    else:
+        # Fallback if tool was not called
         return {
             "intent": "general",
             "confidence": 0.5,
@@ -616,12 +705,21 @@ DEMO_SCENARIOS = [
 
 
 # ============================================================================
+# Async Wrapper for Graph
+# ============================================================================
+
+async def run_graph_async(graph, state, config):
+    """Run the graph asynchronously."""
+    return await graph.ainvoke(state, config)
+
+
+# ============================================================================
 # Interactive REPL
 # ============================================================================
 
-def run_interactive_repl(model, vector_store, provider_key: str, model_id: str):
+async def run_interactive_repl_async(model, vector_store, provider_key: str, model_id: str):
     """Run interactive REPL for customer support."""
-    print("=== Python — Customer Support Agent ===")
+    print("=== Python — Customer Support Agent (Tool API) ===")
     print(f"Provider: {provider_key}")
     print(f"Model: {model_id}")
     print("Mode: interactive")
@@ -671,7 +769,7 @@ def run_interactive_repl(model, vector_store, provider_key: str, model_id: str):
 
         # Run the graph
         try:
-            result = graph.invoke(state, config)
+            result = await run_graph_async(graph, state, config)
 
             # Update state from result
             state.update(result)
@@ -697,13 +795,18 @@ def run_interactive_repl(model, vector_store, provider_key: str, model_id: str):
     print(f"Total turns: {state['turn_count']}")
 
 
+def run_interactive_repl(model, vector_store, provider_key: str, model_id: str):
+    """Synchronous wrapper for async REPL."""
+    asyncio.run(run_interactive_repl_async(model, vector_store, provider_key, model_id))
+
+
 # ============================================================================
 # Demo Mode
 # ============================================================================
 
-def run_demo_scenarios(model, vector_store, provider_key: str, model_id: str):
-    """Run pre-defined demo scenarios."""
-    print("=== Python — Customer Support Agent ===")
+async def run_demo_scenarios_async(model, vector_store, provider_key: str, model_id: str):
+    """Run pre-defined demo scenarios asynchronously."""
+    print("=== Python — Customer Support Agent (Tool API) ===")
     print(f"Provider: {provider_key}")
     print(f"Model: {model_id}")
     print("Mode: demo")
@@ -735,7 +838,7 @@ def run_demo_scenarios(model, vector_store, provider_key: str, model_id: str):
 
         # Run the graph
         try:
-            result = graph.invoke(state, config)
+            result = await run_graph_async(graph, state, config)
 
             # Print results
             print(f"Intent: {result.get('intent', 'unknown').upper()}")
@@ -758,6 +861,11 @@ def run_demo_scenarios(model, vector_store, provider_key: str, model_id: str):
     print(f"Scenarios processed: {len(DEMO_SCENARIOS)}")
 
 
+def run_demo_scenarios(model, vector_store, provider_key: str, model_id: str):
+    """Synchronous wrapper for async demo."""
+    asyncio.run(run_demo_scenarios_async(model, vector_store, provider_key, model_id))
+
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -769,11 +877,9 @@ def main():
     interactive_mode = "--interactive" in sys.argv
     demo_mode = "--demo" in sys.argv
 
+    # Default to demo mode if no flags specified
     if not interactive_mode and not demo_mode:
-        print("Usage:")
-        print("  python main.py --interactive     # Interactive REPL mode")
-        print("  python main.py --demo           # Demo mode with predefined scenarios")
-        sys.exit(1)
+        demo_mode = True
 
     # Get provider settings
     provider_key = os.getenv("LLM_PROVIDER", "openrouter").lower()

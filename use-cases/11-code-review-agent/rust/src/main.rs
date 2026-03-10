@@ -3,23 +3,26 @@ Use Case 11: Code Review Agent
 
 Demonstrates an agent that reads source code files, analyzes them,
 and provides structured code review feedback including bugs, style issues,
-security concerns, and improvement suggestions.
+security concerns, and improvement suggestions using Tool API for reliable structured output.
 
 Key Learning Goals:
-- File I/O tools for reading source files
-- Structured output for code review findings
+- Tool API for structured output - tools accept typed parameters from LLM
 - Large context handling for code analysis
 - Code analysis prompting techniques
+- Multi-turn tool calling for reliable extraction
 */
 
+use std::env;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
 use anyhow::Result;
-use regex::Regex;
-use rig::agent::AgentBuilder;
 use rig::client::CompletionClient;
-use rig::completion::{Chat, Message};
+use rig::completion::{CompletionModel, Prompt, ToolDefinition};
 use rig::providers::{openai, openrouter};
+use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use thiserror::Error;
 
 // =============================================================================
 // SAMPLE CODE FILES (with intentional issues)
@@ -90,24 +93,92 @@ def add_to_cache(key, value, cache=cache):
 // =============================================================================
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ReviewFinding {
-    pub severity: String,
-    pub category: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub line_number: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub code_snippet: Option<String>,
-    pub message: String,
-    pub suggestion: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CodeReview {
     pub summary: String,
-    pub findings: Vec<ReviewFinding>,
     pub overall_score: i32,
+    pub issues: Vec<String>,
     pub file_count: i32,
-    pub lines_reviewed: i32,
+}
+
+// =============================================================================
+// TOOL API - Structured Output Tool
+// =============================================================================
+
+#[derive(Debug, Error)]
+#[error("Code review error")]
+struct CodeReviewError;
+
+#[derive(Debug, Deserialize)]
+struct SubmitCodeReviewArgs {
+    summary: String,
+    overall_score: i32,
+    issues: Vec<String>,
+    file_count: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct CodeReviewResult(String);
+
+struct SubmitCodeReview {
+    result: Arc<Mutex<Option<CodeReview>>>,
+}
+
+impl Tool for SubmitCodeReview {
+    const NAME: &'static str = "submit_code_review";
+
+    type Error = CodeReviewError;
+    type Args = SubmitCodeReviewArgs;
+    type Output = CodeReviewResult;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "submit_code_review".to_string(),
+            description: "Submit structured code review feedback".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "Brief summary of the code quality"
+                    },
+                    "overall_score": {
+                        "type": "integer",
+                        "description": "Overall score from 0-100",
+                        "minimum": 0,
+                        "maximum": 100
+                    },
+                    "issues": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of issues found (each as a brief description)"
+                    },
+                    "file_count": {
+                        "type": "integer",
+                        "description": "Number of files reviewed"
+                    }
+                },
+                "required": ["summary", "overall_score", "issues", "file_count"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let review = CodeReview {
+            summary: args.summary,
+            overall_score: args.overall_score,
+            issues: args.issues,
+            file_count: args.file_count,
+        };
+
+        let mut result = self.result.lock().unwrap();
+        *result = Some(review.clone());
+
+        Ok(CodeReviewResult(format!(
+            "Code review submitted: score {}/100, {} issues found",
+            review.overall_score,
+            review.issues.len()
+        )))
+    }
 }
 
 // =============================================================================
@@ -116,111 +187,15 @@ pub struct CodeReview {
 
 const CODE_REVIEWER_PROMPT: &str = r#"You are an expert code reviewer. Analyze the provided code and give structured feedback.
 
-For each issue found, provide:
-- severity: low, medium, high, or critical
-- category: bugs, security, style, or best_practices
-- line_number: The line where the issue occurs
-- code_snippet: The relevant code snippet
-- message: Clear description of the issue
-- suggestion: Specific recommendation for fixing it
+Provide:
+- A summary of the code quality
+- An overall score from 0-100
+- A list of issues found (each as a brief description)
+- The number of files reviewed
 
-Scoring guidelines:
-- Start at 100
-- Critical: -20 points each
-- High: -10 points each
-- Medium: -5 points each
-- Low: -2 points each
+Focus on: bugs, security issues, style problems, and best practices.
 
-Provide your response as valid JSON matching this schema:
-{
-  "summary": "Overall assessment",
-  "findings": [
-    {
-      "severity": "level",
-      "category": "type",
-      "line_number": number,
-      "code_snippet": "code",
-      "message": "description",
-      "suggestion": "fix"
-    }
-  ],
-  "overall_score": number,
-  "file_count": number,
-  "lines_reviewed": number
-}"#;
-
-// =============================================================================
-// CODE REVIEW FUNCTION
-// =============================================================================
-
-fn extract_json_from_response(response: &str) -> String {
-    // Extract JSON from a response that may contain extra text
-    let response = response.trim();
-
-    // Look for JSON block between ```json and ```
-    let json_block_regex = Regex::new(r"```json\s*(.*?)\s*```").unwrap();
-    if let Some(captures) = json_block_regex.captures(response) {
-        return captures.get(1).unwrap().as_str().trim().to_string();
-    }
-
-    // Look for JSON block between ``` and ```
-    let code_block_regex = Regex::new(r"```\s*(.*?)\s*```").unwrap();
-    if let Some(captures) = code_block_regex.captures(response) {
-        let candidate = captures.get(1).unwrap().as_str().trim();
-        if candidate.starts_with('{') {
-            return candidate.to_string();
-        }
-    }
-
-    // Look for { and } as JSON boundaries
-    if let Some(start) = response.find('{') {
-        let mut brace_count = 0;
-        for (i, ch) in response[start..].char_indices() {
-            match ch {
-                '{' => brace_count += 1,
-                '}' => {
-                    brace_count -= 1;
-                    if brace_count == 0 {
-                        return response[start..start + i + 1].to_string();
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    response.to_string()
-}
-
-async fn review_code<T: Chat>(
-    code_contents: &[(String, String)],
-    agent: &T,
-) -> Result<CodeReview> {
-    let code_text = code_contents
-        .iter()
-        .map(|(path, content)| {
-            format!(
-                "\n{}\nFILE: {}\n{}\n{}",
-                "=".repeat(60),
-                path,
-                "=".repeat(60),
-                content
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let user_prompt = format!(
-        "CODE TO REVIEW:\n{}\n\nAnalyze this code and return valid JSON.",
-        code_text
-    );
-
-    let response = agent.chat(CODE_REVIEWER_PROMPT, vec![Message::user(&user_prompt)]).await?;
-    let json_str = extract_json_from_response(&response);
-    let parsed: CodeReview = serde_json::from_str(&json_str)?;
-
-    Ok(parsed)
-}
+IMPORTANT: You MUST use the submit_code_review tool to submit your assessment."#;
 
 // =============================================================================
 // REPORT FORMATTING
@@ -236,57 +211,22 @@ fn print_review_report(review: &CodeReview, provider_name: &str, model_id: &str)
     println!();
     println!("Summary: {}", review.summary);
     println!("Files Reviewed: {}", review.file_count);
-    println!("Lines Reviewed: {}", review.lines_reviewed);
     println!("Overall Score: {}/100", review.overall_score);
     println!();
     println!("{}", "─".repeat(60));
-    println!("FINDINGS");
+    println!("ISSUES FOUND");
     println!("{}", "─".repeat(60));
 
-    if review.findings.is_empty() {
+    if review.issues.is_empty() {
         println!("\n✓ No issues found!");
     } else {
-        // Group by severity
-        let severity_order = ["critical", "high", "medium", "low"];
-        let mut grouped: HashMap<&str, Vec<&ReviewFinding>> =
-            severity_order.iter().map(|&s| (s, Vec::new())).collect();
-
-        for finding in &review.findings {
-            let sev = finding.severity.to_lowercase();
-            if let Some(bucket) = grouped.get_mut(sev.as_str()) {
-                bucket.push(finding);
-            }
-        }
-
-        for severity in severity_order {
-            if let Some(findings) = grouped.get(severity) {
-                for (i, finding) in findings.iter().enumerate() {
-                    println!(
-                        "\n[{}] {} | {} | Line {}",
-                        i + 1,
-                        severity.to_uppercase(),
-                        finding.category,
-                        finding.line_number.map(|n| n.to_string()).unwrap_or_else(|| "?".to_string())
-                    );
-                    println!("    {}", finding.message);
-
-                    if let Some(snippet) = &finding.code_snippet {
-                        let truncated = if snippet.len() > 60 {
-                            format!("{}...", &snippet[..60])
-                        } else {
-                            snippet.clone()
-                        };
-                        println!("    Code: {}", truncated);
-                    }
-
-                    println!("    → {}", finding.suggestion);
-                }
-            }
+        for (i, issue) in review.issues.iter().enumerate() {
+            println!("\n[{}] {}", i + 1, issue);
         }
     }
 
     println!("\n{}", "=".repeat(60));
-    println!("Total Issues: {}", review.findings.len());
+    println!("Total Issues: {}", review.issues.len());
     println!("{}", "=".repeat(60));
 }
 
@@ -295,69 +235,96 @@ fn print_review_report(review: &CodeReview, provider_name: &str, model_id: &str)
 // =============================================================================
 
 async fn run_openrouter() -> Result<()> {
-    let model_id = std::env::var("MODEL_ID")
+    let model_id = env::var("MODEL_ID")
         .unwrap_or_else(|_| "stepfun/step-3.5-flash:free".to_string());
 
     println!("Provider: openrouter");
     println!("Model: {}", model_id);
     println!();
 
-    let api_key = std::env::var("OPENROUTER_API_KEY")
+    let api_key = env::var("OPENROUTER_API_KEY")
         .expect("OPENROUTER_API_KEY not set");
     let client = openrouter::Client::new(&api_key)?;
     let model = client.completion_model(&model_id);
-    let agent = AgentBuilder::new(model).build();
 
-    // Prepare sample code contents
-    let code_contents: Vec<(String, String)> = SAMPLE_FILES
-        .iter()
-        .map(|(name, content)| (name.to_string(), content.trim().to_string()))
-        .collect();
-
-    // Perform code review
-    let review = review_code(&code_contents, &agent).await?;
-
-    // Print the report
-    print_review_report(&review, "openrouter", &model_id);
-
-    Ok(())
+    run_demo(model, "openrouter", &model_id).await
 }
 
 async fn run_openai() -> Result<()> {
-    let model_id = std::env::var("MODEL_ID")
+    let model_id = env::var("MODEL_ID")
         .unwrap_or_else(|_| "gpt-4.1-nano".to_string());
 
     println!("Provider: openai");
     println!("Model: {}", model_id);
     println!();
 
-    let api_key = std::env::var("OPENAI_API_KEY")
+    let api_key = env::var("OPENAI_API_KEY")
         .expect("OPENAI_API_KEY not set");
     let client = openai::Client::new(&api_key)?;
     let model = client.completion_model(&model_id);
-    let agent = AgentBuilder::new(model).build();
 
-    // Prepare sample code contents
-    let code_contents: Vec<(String, String)> = SAMPLE_FILES
+    run_demo(model, "openai", &model_id).await
+}
+
+async fn run_demo<M>(model: M, provider_name: &str, model_id: &str) -> Result<()>
+where
+    M: CompletionModel + Clone + Send + Sync + 'static,
+{
+    let review_result: Arc<Mutex<Option<CodeReview>>> = Arc::new(Mutex::new(None));
+
+    let agent = rig::agent::AgentBuilder::new(model)
+        .preamble(CODE_REVIEWER_PROMPT)
+        .tool(SubmitCodeReview { result: review_result.clone() })
+        .build();
+
+    // Build code text
+    let code_text = SAMPLE_FILES
         .iter()
-        .map(|(name, content)| (name.to_string(), content.trim().to_string()))
-        .collect();
+        .map(|(path, content)| {
+            format!(
+                "\n{}\nFILE: {}\n{}\n{}",
+                "=".repeat(60),
+                path,
+                "=".repeat(60),
+                content.trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    // Perform code review
-    let review = review_code(&code_contents, &agent).await?;
+    let prompt = format!(
+        "{}\n\nCODE TO REVIEW:\n{}\n\nAnalyze the code and use the submit_code_review tool to submit your assessment.",
+        CODE_REVIEWER_PROMPT, code_text
+    );
+
+    println!("Analyzing code...");
+    let _response = agent.prompt(&prompt).max_turns(5).await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let review = {
+        let result = review_result.lock().unwrap();
+        result
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Code review tool was not called"))?
+            .clone()
+    };
 
     // Print the report
-    print_review_report(&review, "openai", &model_id);
+    print_review_report(&review, provider_name, model_id);
 
     Ok(())
 }
+
+// =============================================================================
+// MAIN
+// =============================================================================
 
 #[tokio::main]
 async fn main() -> Result<()> {
     println!("=== Rust — Code Review Agent ===");
     println!();
 
-    let provider = std::env::var("LLM_PROVIDER")
+    let provider = env::var("LLM_PROVIDER")
         .unwrap_or_else(|_| "openrouter".to_string())
         .to_lowercase();
 

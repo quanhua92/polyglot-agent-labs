@@ -10,13 +10,17 @@
 use std::collections::HashMap;
 use std::env;
 use std::io::Write;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use reqwest::Client;
 use rig::client::CompletionClient;
-use rig::completion::Chat;
+use rig::completion::{CompletionModel, Prompt, ToolDefinition};
 use rig::providers::{anthropic, openai, openrouter};
+use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 // ============================================================================
 // Constants
@@ -257,6 +261,90 @@ pub struct SupportResponse {
 }
 
 // ============================================================================
+// Tool API - Intent Classification Tool
+// ============================================================================
+
+#[derive(Debug, Error)]
+#[error("Classification error")]
+struct ClassificationError;
+
+#[derive(Debug, Deserialize)]
+struct SubmitIntentArgs {
+    intent: String,
+    confidence: f32,
+    #[serde(default)]
+    entities: HashMap<String, String>,
+    #[serde(default)]
+    urgency: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SubmitIntentResult(String);
+
+struct SubmitIntent {
+    result: Arc<Mutex<Option<IntentClassification>>>,
+}
+
+impl Tool for SubmitIntent {
+    const NAME: &'static str = "submit_intent";
+
+    type Error = ClassificationError;
+    type Args = SubmitIntentArgs;
+    type Output = SubmitIntentResult;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "submit_intent".to_string(),
+            description: "Submit intent classification for customer message".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "intent": {
+                        "type": "string",
+                        "enum": ["billing", "shipping", "returns", "account", "general", "escalate"],
+                        "description": "The classified intent category"
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "Confidence score from 0.0 to 1.0",
+                        "minimum": 0.0,
+                        "maximum": 1.0
+                    },
+                    "entities": {
+                        "type": "object",
+                        "description": "Extracted entities like order_id, email, product_name",
+                        "additionalProperties": {"type": "string"}
+                    },
+                    "urgency": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high"],
+                        "description": "Urgency level of the message"
+                    }
+                },
+                "required": ["intent", "confidence"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let classification = IntentClassification {
+            intent: args.intent,
+            confidence: args.confidence,
+            entities: args.entities,
+            urgency: if args.urgency.is_empty() { "medium".to_string() } else { args.urgency },
+        };
+
+        let mut result = self.result.lock().unwrap();
+        *result = Some(classification.clone());
+
+        Ok(SubmitIntentResult(format!(
+            "Intent classified: {} (confidence: {:.2})",
+            classification.intent, classification.confidence
+        )))
+    }
+}
+
+// ============================================================================
 // Embeddings API
 // ============================================================================
 
@@ -411,83 +499,72 @@ fn chunk_document(content: &str, chunk_size: usize) -> Vec<String> {
 }
 
 // ============================================================================
-// JSON Extraction Helper
-// ============================================================================
-
-fn extract_json_from_response(response: &str) -> String {
-    let response = response.trim();
-
-    // Look for JSON block between ```json and ```
-    if let Some(start) = response.find("```json") {
-        let json_start = start + 7;
-        if let Some(end) = response[json_start..].find("```") {
-            return response[json_start..json_start + end].trim().to_string();
-        }
-    }
-
-    // Look for JSON block between ``` and ```
-    if let Some(start) = response.find("```") {
-        let json_start = start + 3;
-        if let Some(end) = response[json_start..].find("```") {
-            return response[json_start..json_start + end].trim().to_string();
-        }
-    }
-
-    // Look for { and } as JSON boundaries
-    if let Some(start) = response.find('{') {
-        if let Some(end) = response.rfind('}') {
-            return response[start..=end].to_string();
-        }
-    }
-
-    response.to_string()
-}
-
-// ============================================================================
 // Support Agent Pipeline
 // ============================================================================
 
-async fn classify_intent(
+async fn classify_intent<M>(
     user_input: &str,
-    agent: &impl Chat,
-) -> Result<IntentClassification> {
+    model: M,
+) -> Result<IntentClassification>
+where
+    M: CompletionModel + Clone + Send + Sync + 'static,
+{
+    let intent_result: Arc<Mutex<Option<IntentClassification>>> = Arc::new(Mutex::new(None));
+
+    let agent = rig::agent::AgentBuilder::new(model)
+        .preamble(INTENT_CLASSIFIER_PROMPT)
+        .tool(SubmitIntent { result: intent_result.clone() })
+        .build();
+
     let prompt = format!(
-        r#"{}
+        r#"Classify this customer message:
 
-Customer message: {}
+{}
 
-Classify this message and return structured JSON."#,
-        INTENT_CLASSIFIER_PROMPT, user_input
+IMPORTANT: You MUST use the submit_intent tool to submit your classification."#,
+        user_input
     );
 
-    let response = agent.chat(&prompt, vec![]).await?;
-    let json_str = extract_json_from_response(&response);
-    let parsed: IntentClassification = serde_json::from_str(&json_str)
-        .map_err(|e| anyhow::anyhow!("Failed to parse intent classification JSON: {}", e))?;
+    let _response = agent.prompt(&prompt).max_turns(5).await?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
-    Ok(parsed)
+    let result = intent_result.lock().unwrap();
+    Ok(result
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Intent classification tool was not called"))?
+        .clone())
 }
 
-async fn generate_response(
+async fn generate_response<M>(
     user_input: &str,
     kb_context: &str,
-    agent: &impl Chat,
-) -> Result<String> {
+    model: M,
+) -> Result<String>
+where
+    M: CompletionModel + Send + Sync,
+{
+    let agent = rig::agent::AgentBuilder::new(model)
+        .preamble(RESPONSE_GENERATOR_PROMPT)
+        .build();
+
     let prompt = format!(
-        "{}\n\nCustomer question: {}\n\nRelevant information from our knowledge base:\n{}\n\nProvide a helpful response. Include citations to the source articles.",
-        RESPONSE_GENERATOR_PROMPT, user_input, kb_context
+        "Customer question: {}\n\nRelevant information from our knowledge base:\n{}\n\nProvide a helpful response. Include citations to the source articles.",
+        user_input, kb_context
     );
 
-    Ok(agent.chat(&prompt, vec![]).await?)
+    Ok(agent.prompt(&prompt).max_turns(3).await?)
 }
 
-async fn process_customer_message(
+async fn process_customer_message<M>(
     user_input: &str,
-    agent: &impl Chat,
+    model: M,
     vector_store: &VectorStore,
-) -> Result<(IntentClassification, SupportResponse)> {
+) -> Result<(IntentClassification, SupportResponse)>
+where
+    M: CompletionModel + Clone + Send + Sync + 'static,
+{
     // Step 1: Classify intent
-    let classification = classify_intent(user_input, agent).await?;
+    let classification = classify_intent(user_input, model.clone()).await?;
 
     // Step 2: Check escalation conditions
     let should_escalate = classification.confidence < ESCALATION_CONFIDENCE_THRESHOLD
@@ -529,7 +606,7 @@ async fn process_customer_message(
     let sources: Vec<String> = retrieved.iter().map(|c| c.source.clone()).collect();
 
     // Step 4: Generate response
-    let response_text = generate_response(user_input, &kb_context, agent).await?;
+    let response_text = generate_response(user_input, &kb_context, model).await?;
 
     let response = SupportResponse {
         response: response_text,
@@ -545,11 +622,14 @@ async fn process_customer_message(
 // Interactive REPL
 // ============================================================================
 
-async fn run_interactive_repl(
-    agent: &impl Chat,
+async fn run_interactive_repl<M>(
+    model: M,
     vector_store: &VectorStore,
     provider_key: &str,
-) -> Result<usize> {
+) -> Result<usize>
+where
+    M: CompletionModel + Clone + Send + Sync + 'static,
+{
     println!("=== Rust — Customer Support Agent ===");
     println!("Provider:  {}", provider_key);
     println!("Mode:      interactive");
@@ -588,7 +668,7 @@ async fn run_interactive_repl(
         }
 
         // Process the message
-        match process_customer_message(user_input, agent, vector_store).await {
+        match process_customer_message(user_input, model.clone(), vector_store).await {
             Ok((classification, response)) => {
                 println!(
                     "\n[Intent: {} | Confidence: {:.2}]",
@@ -621,11 +701,14 @@ async fn run_interactive_repl(
 // Demo Mode
 // ============================================================================
 
-async fn run_demo_scenarios(
-    agent: &impl Chat,
+async fn run_demo_scenarios<M>(
+    model: M,
     vector_store: &VectorStore,
     provider_key: &str,
-) -> Result<usize> {
+) -> Result<usize>
+where
+    M: CompletionModel + Clone + Send + Sync + 'static,
+{
     println!("=== Rust — Customer Support Agent ===");
     println!("Provider:  {}", provider_key);
     println!("Mode:      demo");
@@ -642,7 +725,7 @@ async fn run_demo_scenarios(
         println!("Input: {}", scenario.input);
         println!("{}", "-".repeat(50));
 
-        match process_customer_message(scenario.input, agent, vector_store).await {
+        match process_customer_message(scenario.input, model.clone(), vector_store).await {
             Ok((classification, response)) => {
                 println!("Intent: {}", classification.intent.to_uppercase());
                 println!("Confidence: {:.2}", classification.confidence);
@@ -673,12 +756,16 @@ async fn run_demo_scenarios(
 }
 
 // ============================================================================
+// Helper: Extract JSON from LLM response
+// ============================================================================
+
+// ============================================================================
 // Provider Setup
 // ============================================================================
 
 async fn run_openai(interactive: bool) -> Result<usize> {
     let model_id = "gpt-4.1-nano";
-    println!("Model:     {}", model_id);
+    println!("Model:     {model_id}");
     println!();
 
     let api_key = env::var("OPENAI_API_KEY")
@@ -689,7 +776,6 @@ async fn run_openai(interactive: bool) -> Result<usize> {
 
     let client = openai::Client::new(&api_key)?;
     let model = client.completion_model(model_id);
-    let agent = rig::agent::AgentBuilder::new(model).build();
 
     let mut vector_store = VectorStore::new(embedding_key, base_url.to_string());
     println!("Indexing knowledge base...");
@@ -699,15 +785,15 @@ async fn run_openai(interactive: bool) -> Result<usize> {
     println!();
 
     if interactive {
-        run_interactive_repl(&agent, &vector_store, "openai").await
+        run_interactive_repl(model, &vector_store, "openai").await
     } else {
-        run_demo_scenarios(&agent, &vector_store, "openai").await
+        run_demo_scenarios(model, &vector_store, "openai").await
     }
 }
 
 async fn run_anthropic(interactive: bool) -> Result<usize> {
     let model_id = "claude-3-haiku-20240307";
-    println!("Model:     {}", model_id);
+    println!("Model:     {model_id}");
     println!();
 
     let api_key = env::var("ANTHROPIC_API_KEY")
@@ -725,7 +811,6 @@ async fn run_anthropic(interactive: bool) -> Result<usize> {
 
     let client = anthropic::Client::new(&api_key)?;
     let model = client.completion_model(model_id);
-    let agent = rig::agent::AgentBuilder::new(model).build();
 
     let mut vector_store = VectorStore::new(embedding_key, embedding_base.to_string());
     println!("Indexing knowledge base...");
@@ -735,15 +820,15 @@ async fn run_anthropic(interactive: bool) -> Result<usize> {
     println!();
 
     if interactive {
-        run_interactive_repl(&agent, &vector_store, "anthropic").await
+        run_interactive_repl(model, &vector_store, "anthropic").await
     } else {
-        run_demo_scenarios(&agent, &vector_store, "anthropic").await
+        run_demo_scenarios(model, &vector_store, "anthropic").await
     }
 }
 
 async fn run_openrouter(interactive: bool) -> Result<usize> {
     let model_id = "stepfun/step-3.5-flash:free";
-    println!("Model:     {}", model_id);
+    println!("Model:     {model_id}");
     println!();
 
     let api_key = env::var("OPENROUTER_API_KEY")
@@ -752,7 +837,6 @@ async fn run_openrouter(interactive: bool) -> Result<usize> {
 
     let client = openrouter::Client::new(&api_key)?;
     let model = client.completion_model(model_id);
-    let agent = rig::agent::AgentBuilder::new(model).build();
 
     let mut vector_store = VectorStore::new(api_key.clone(), base_url.to_string());
     println!("Indexing knowledge base...");
@@ -762,9 +846,9 @@ async fn run_openrouter(interactive: bool) -> Result<usize> {
     println!();
 
     if interactive {
-        run_interactive_repl(&agent, &vector_store, "openrouter").await
+        run_interactive_repl(model, &vector_store, "openrouter").await
     } else {
-        run_demo_scenarios(&agent, &vector_store, "openrouter").await
+        run_demo_scenarios(model, &vector_store, "openrouter").await
     }
 }
 
@@ -778,21 +862,23 @@ async fn main() -> Result<()> {
     let interactive = args.contains(&"--interactive".to_string());
     let demo = args.contains(&"--demo".to_string());
 
-    if !interactive && !demo {
-        println!("Usage:");
-        println!("  cargo run -- --interactive    # Interactive REPL mode");
-        println!("  cargo run -- --demo          # Demo mode with predefined scenarios");
-        std::process::exit(1);
-    }
+    // Default to demo mode if no flags specified
+    let run_mode = if interactive {
+        "interactive"
+    } else if demo {
+        "demo"
+    } else {
+        "demo"  // Default to demo mode
+    };
 
     let provider = env::var("LLM_PROVIDER")
         .unwrap_or_else(|_| "openrouter".to_string())
         .to_lowercase();
 
     let _turn_count = match provider.as_str() {
-        "openai" => run_openai(interactive).await?,
-        "anthropic" => run_anthropic(interactive).await?,
-        "openrouter" => run_openrouter(interactive).await?,
+        "openai" => run_openai(run_mode == "interactive").await?,
+        "anthropic" => run_anthropic(run_mode == "interactive").await?,
+        "openrouter" => run_openrouter(run_mode == "interactive").await?,
         _ => {
             bail!(
                 "Unknown provider: '{}'. Supported: openai, anthropic, openrouter",

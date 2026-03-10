@@ -1,5 +1,5 @@
 //! Polyglot Agent Labs — Use Case 06: Structured Output & Data Extraction
-//! Extract typed, validated data from unstructured text using structured LLM output.
+//! Extract typed, validated data from unstructured text using Tool API.
 //! Switch provider with env var LLM_PROVIDER (default: openrouter).
 //!
 //! Usage:
@@ -11,15 +11,19 @@
 //! - Emails: sender, recipients, subject, action_items, urgency, key_points, deadline
 
 use std::env;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use rig::client::CompletionClient;
-use rig::completion::Chat;
+use rig::completion::{CompletionModel, Prompt, ToolDefinition};
 use rig::providers::{anthropic, openai, openrouter};
+use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 // ============================================================================
-// Serde Structs for Structured Extraction
+// Serde Structs for Validation
 // ============================================================================
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -39,7 +43,7 @@ pub struct JobListing {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProductReview {
     pub product_name: String,
-    pub rating: i32,
+    pub rating: f32,
     pub pros: Vec<String>,
     pub cons: Vec<String>,
     pub summary: String,
@@ -139,111 +143,231 @@ Sarah
 "#;
 
 // ============================================================================
-// Extraction Functions
+// Tool API - Structured Output Tools
 // ============================================================================
 
-async fn extract_job_listing(text: &str, agent: &impl Chat) -> Result<JobListing> {
-    let prompt = format!(
-        "Extract structured data from the following job listing. Return valid JSON matching this schema:\n\
-        {{\n\
-          \"title\": \"string\",\n\
-          \"company\": \"string\",\n\
-          \"location\": \"string\",\n\
-          \"salary_range\": \"string or null\",\n\
-          \"required_skills\": [\"string\"],\n\
-          \"employment_type\": \"string or null\",\n\
-          \"description\": \"string or null\"\n\
-        }}\n\n\
-        Job listing:\n{}",
-        text
-    );
+// ----------------------------------------------------------------------------
+// ExtractJobListing Tool
+// ----------------------------------------------------------------------------
 
-    let response = agent.chat(&prompt, vec![]).await?;
+#[derive(Debug, Error)]
+#[error("Job listing error")]
+struct JobListingError;
 
-    // Try to extract JSON from the response
-    let json_str = extract_json_from_response(&response);
-    let parsed: JobListing = serde_json::from_str(&json_str)
-        .map_err(|e| anyhow::anyhow!("Failed to parse job listing JSON: {}", e))?;
-
-    Ok(parsed)
+#[derive(Debug, Deserialize)]
+struct ExtractJobListingArgs {
+    title: String,
+    company: String,
+    location: String,
+    #[serde(default)]
+    salary_range: Option<String>,
+    required_skills: Vec<String>,
+    #[serde(default)]
+    employment_type: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
-async fn extract_product_review(text: &str, agent: &impl Chat) -> Result<ProductReview> {
-    let prompt = format!(
-        "Extract structured data from the following product review. Return valid JSON matching this schema:\n\
-        {{\n\
-          \"product_name\": \"string\",\n\
-          \"rating\": integer (1-5),\n\
-          \"pros\": [\"string\"],\n\
-          \"cons\": [\"string\"],\n\
-          \"summary\": \"string\",\n\
-          \"would_recommend\": boolean or null\n\
-        }}\n\n\
-        Product review:\n{}",
-        text
-    );
+#[derive(Debug, Serialize)]
+struct JobListingResult(String);
 
-    let response = agent.chat(&prompt, vec![]).await?;
-    let json_str = extract_json_from_response(&response);
-    let parsed: ProductReview = serde_json::from_str(&json_str)
-        .map_err(|e| anyhow::anyhow!("Failed to parse product review JSON: {}", e))?;
-
-    Ok(parsed)
+struct ExtractJobListing {
+    result: Arc<Mutex<Option<JobListing>>>,
 }
 
-async fn extract_email_info(text: &str, agent: &impl Chat) -> Result<EmailInfo> {
-    let prompt = format!(
-        "Extract structured data from the following email. Return valid JSON matching this schema:\n\
-        {{\n\
-          \"sender\": \"string\",\n\
-          \"recipients\": [\"string\"],\n\
-          \"subject\": \"string\",\n\
-          \"action_items\": [\"string\"],\n\
-          \"urgency\": \"string\" (high/medium/low),\n\
-          \"key_points\": [\"string\"],\n\
-          \"deadline\": \"string or null\"\n\
-        }}\n\n\
-        Email:\n{}",
-        text
-    );
+impl Tool for ExtractJobListing {
+    const NAME: &'static str = "extract_job_listing";
 
-    let response = agent.chat(&prompt, vec![]).await?;
-    let json_str = extract_json_from_response(&response);
-    let parsed: EmailInfo = serde_json::from_str(&json_str)
-        .map_err(|e| anyhow::anyhow!("Failed to parse email info JSON: {}", e))?;
+    type Error = JobListingError;
+    type Args = ExtractJobListingArgs;
+    type Output = JobListingResult;
 
-    Ok(parsed)
-}
-
-fn extract_json_from_response(response: &str) -> String {
-    // Try to find JSON in the response (handles cases where LLM adds extra text)
-    let response = response.trim();
-
-    // Look for JSON block between ```json and ```
-    if let Some(start) = response.find("```json") {
-        let json_start = start + 7; // Skip ```json
-        if let Some(end) = response[json_start..].find("```") {
-            return response[json_start..json_start + end].trim().to_string();
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "extract_job_listing".to_string(),
+            description: "Extract structured job listing data from unstructured text".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Job title"},
+                    "company": {"type": "string", "description": "Company name"},
+                    "location": {"type": "string", "description": "Job location"},
+                    "salary_range": {"type": "string", "description": "Salary range if mentioned"},
+                    "required_skills": {"type": "array", "items": {"type": "string"}, "description": "List of required skills"},
+                    "employment_type": {"type": "string", "description": "Employment type if mentioned"},
+                    "description": {"type": "string", "description": "Job description summary"}
+                },
+                "required": ["title", "company", "location", "required_skills"]
+            }),
         }
     }
 
-    // Look for JSON block between ``` and ```
-    if let Some(start) = response.find("```") {
-        let json_start = start + 3;
-        if let Some(end) = response[json_start..].find("```") {
-            return response[json_start..json_start + end].trim().to_string();
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let listing = JobListing {
+            title: args.title,
+            company: args.company,
+            location: args.location,
+            salary_range: args.salary_range,
+            required_skills: args.required_skills,
+            employment_type: args.employment_type,
+            description: args.description,
+        };
+
+        let mut result = self.result.lock().unwrap();
+        *result = Some(listing.clone());
+
+        Ok(JobListingResult(format!(
+            "Extracted: {} at {}",
+            listing.title, listing.company
+        )))
+    }
+}
+
+// ----------------------------------------------------------------------------
+// ExtractProductReview Tool
+// ----------------------------------------------------------------------------
+
+#[derive(Debug, Error)]
+#[error("Product review error")]
+struct ProductReviewError;
+
+#[derive(Debug, Deserialize)]
+struct ExtractProductReviewArgs {
+    product_name: String,
+    rating: f32,
+    pros: Vec<String>,
+    cons: Vec<String>,
+    summary: String,
+    #[serde(default)]
+    would_recommend: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProductReviewResult(String);
+
+struct ExtractProductReview {
+    result: Arc<Mutex<Option<ProductReview>>>,
+}
+
+impl Tool for ExtractProductReview {
+    const NAME: &'static str = "extract_product_review";
+
+    type Error = ProductReviewError;
+    type Args = ExtractProductReviewArgs;
+    type Output = ProductReviewResult;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "extract_product_review".to_string(),
+            description: "Extract structured product review data from unstructured text".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "product_name": {"type": "string", "description": "Name of the product"},
+                    "rating": {"type": "number", "description": "Product rating (usually 1-5 or 1-10)"},
+                    "pros": {"type": "array", "items": {"type": "string"}, "description": "List of pros mentioned"},
+                    "cons": {"type": "array", "items": {"type": "string"}, "description": "List of cons mentioned"},
+                    "summary": {"type": "string", "description": "Summary of the review"},
+                    "would_recommend": {"type": "boolean", "description": "Whether reviewer recommends the product"}
+                },
+                "required": ["product_name", "rating", "pros", "cons", "summary"]
+            }),
         }
     }
 
-    // Look for { and } as JSON boundaries
-    if let Some(start) = response.find('{') {
-        if let Some(end) = response.rfind('}') {
-            return response[start..=end].to_string();
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let review = ProductReview {
+            product_name: args.product_name,
+            rating: args.rating,
+            pros: args.pros,
+            cons: args.cons,
+            summary: args.summary,
+            would_recommend: args.would_recommend,
+        };
+
+        let mut result = self.result.lock().unwrap();
+        *result = Some(review.clone());
+
+        Ok(ProductReviewResult(format!(
+            "Extracted review for {} - {}/5",
+            review.product_name, review.rating
+        )))
+    }
+}
+
+// ----------------------------------------------------------------------------
+// ExtractEmailInfo Tool
+// ----------------------------------------------------------------------------
+
+#[derive(Debug, Error)]
+#[error("Email info error")]
+struct EmailInfoError;
+
+#[derive(Debug, Deserialize)]
+struct ExtractEmailInfoArgs {
+    sender: String,
+    recipients: Vec<String>,
+    subject: String,
+    action_items: Vec<String>,
+    urgency: String,
+    key_points: Vec<String>,
+    #[serde(default)]
+    deadline: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct EmailInfoResult(String);
+
+struct ExtractEmailInfo {
+    result: Arc<Mutex<Option<EmailInfo>>>,
+}
+
+impl Tool for ExtractEmailInfo {
+    const NAME: &'static str = "extract_email_info";
+
+    type Error = EmailInfoError;
+    type Args = ExtractEmailInfoArgs;
+    type Output = EmailInfoResult;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "extract_email_info".to_string(),
+            description: "Extract structured email information from unstructured text".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "sender": {"type": "string", "description": "Email sender"},
+                    "recipients": {"type": "array", "items": {"type": "string"}, "description": "Email recipients"},
+                    "subject": {"type": "string", "description": "Email subject"},
+                    "action_items": {"type": "array", "items": {"type": "string"}, "description": "Action items extracted from email"},
+                    "urgency": {"type": "string", "description": "Urgency level (urgent, normal, low)"},
+                    "key_points": {"type": "array", "items": {"type": "string"}, "description": "Key points from the email"},
+                    "deadline": {"type": "string", "description": "Deadline if mentioned"}
+                },
+                "required": ["sender", "recipients", "subject", "action_items", "urgency", "key_points"]
+            }),
         }
     }
 
-    // Return as-is if no JSON markers found
-    response.to_string()
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let info = EmailInfo {
+            sender: args.sender,
+            recipients: args.recipients,
+            subject: args.subject,
+            action_items: args.action_items,
+            urgency: args.urgency,
+            key_points: args.key_points,
+            deadline: args.deadline,
+        };
+
+        let mut result = self.result.lock().unwrap();
+        *result = Some(info.clone());
+
+        Ok(EmailInfoResult(format!(
+            "Extracted email from {} - urgency: {}",
+            info.sender, info.urgency
+        )))
+    }
 }
 
 // ============================================================================
@@ -252,7 +376,7 @@ fn extract_json_from_response(response: &str) -> String {
 
 async fn run_openai() -> Result<(usize, usize)> {
     let model_id = "gpt-4.1-nano";
-    println!("Model:     {}", model_id);
+    println!("Model:     {model_id}");
     println!();
 
     let api_key = env::var("OPENAI_API_KEY")
@@ -260,14 +384,13 @@ async fn run_openai() -> Result<(usize, usize)> {
 
     let client = openai::Client::new(&api_key)?;
     let model = client.completion_model(model_id);
-    let agent = rig::agent::AgentBuilder::new(model).build();
 
-    run_demo(agent, "openai").await
+    run_demo(model, "openai").await
 }
 
 async fn run_anthropic() -> Result<(usize, usize)> {
     let model_id = "claude-3-haiku-20240307";
-    println!("Model:     {}", model_id);
+    println!("Model:     {model_id}");
     println!();
 
     let api_key = env::var("ANTHROPIC_API_KEY")
@@ -275,14 +398,13 @@ async fn run_anthropic() -> Result<(usize, usize)> {
 
     let client = anthropic::Client::new(&api_key)?;
     let model = client.completion_model(model_id);
-    let agent = rig::agent::AgentBuilder::new(model).build();
 
-    run_demo(agent, "anthropic").await
+    run_demo(model, "anthropic").await
 }
 
 async fn run_openrouter() -> Result<(usize, usize)> {
     let model_id = "stepfun/step-3.5-flash:free";
-    println!("Model:     {}", model_id);
+    println!("Model:     {model_id}");
     println!();
 
     let api_key = env::var("OPENROUTER_API_KEY")
@@ -290,18 +412,20 @@ async fn run_openrouter() -> Result<(usize, usize)> {
 
     let client = openrouter::Client::new(&api_key)?;
     let model = client.completion_model(model_id);
-    let agent = rig::agent::AgentBuilder::new(model).build();
 
-    run_demo(agent, "openrouter").await
+    run_demo(model, "openrouter").await
 }
 
 // ============================================================================
 // Demo Execution
 // ============================================================================
 
-async fn run_demo(agent: impl Chat, provider_key: &str) -> Result<(usize, usize)> {
+async fn run_demo<M>(model: M, provider_key: &str) -> Result<(usize, usize)>
+where
+    M: CompletionModel + Clone + Send + Sync + 'static,
+{
     println!("=== Rust — Structured Output & Data Extraction ===");
-    println!("Provider:  {}", provider_key);
+    println!("Provider:  {provider_key}");
     println!();
 
     let mut success_count = 0;
@@ -315,13 +439,34 @@ async fn run_demo(agent: impl Chat, provider_key: &str) -> Result<(usize, usize)
     println!("Input: {}...", &SAMPLE_JOB_LISTING[..100].trim());
     println!();
 
-    match extract_job_listing(SAMPLE_JOB_LISTING, &agent).await {
-        Ok(result) => {
-            let json = serde_json::to_string_pretty(&result)?;
-            println!("\nExtracted Data:");
-            println!("{}", json);
-            println!("\nValidation: ✓ All required fields present");
-            success_count += 1;
+    let job_result: Arc<Mutex<Option<JobListing>>> = Arc::new(Mutex::new(None));
+    let agent = rig::agent::AgentBuilder::new(model.clone())
+        .tool(ExtractJobListing { result: job_result.clone() })
+        .build();
+
+    let prompt = format!(
+        r#"Extract structured job listing data from this text:
+
+{}
+
+Use the extract_job_listing tool to submit the extracted data."#,
+        SAMPLE_JOB_LISTING.trim()
+    );
+
+    match agent.prompt(&prompt).max_turns(5).await {
+        Ok(_) => {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let result = job_result.lock().unwrap();
+            if let Some(ref listing) = *result {
+                let json = serde_json::to_string_pretty(listing)?;
+                println!("\nExtracted Data:");
+                println!("{}", json);
+                println!("\nValidation: ✓ All required fields present");
+                success_count += 1;
+            } else {
+                println!("\n✗ Error: Tool was not called");
+                failure_count += 1;
+            }
         }
         Err(e) => {
             println!("\n✗ Error: {}", e);
@@ -340,13 +485,34 @@ async fn run_demo(agent: impl Chat, provider_key: &str) -> Result<(usize, usize)
     println!("Input: {}...", &SAMPLE_PRODUCT_REVIEW[..100].trim());
     println!();
 
-    match extract_product_review(SAMPLE_PRODUCT_REVIEW, &agent).await {
-        Ok(result) => {
-            let json = serde_json::to_string_pretty(&result)?;
-            println!("\nExtracted Data:");
-            println!("{}", json);
-            println!("\nValidation: ✓ All required fields present");
-            success_count += 1;
+    let review_result: Arc<Mutex<Option<ProductReview>>> = Arc::new(Mutex::new(None));
+    let agent = rig::agent::AgentBuilder::new(model.clone())
+        .tool(ExtractProductReview { result: review_result.clone() })
+        .build();
+
+    let prompt = format!(
+        r#"Extract structured product review data from this text:
+
+{}
+
+Use the extract_product_review tool to submit the extracted data."#,
+        SAMPLE_PRODUCT_REVIEW.trim()
+    );
+
+    match agent.prompt(&prompt).max_turns(5).await {
+        Ok(_) => {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let result = review_result.lock().unwrap();
+            if let Some(ref review) = *result {
+                let json = serde_json::to_string_pretty(review)?;
+                println!("\nExtracted Data:");
+                println!("{}", json);
+                println!("\nValidation: ✓ All required fields present");
+                success_count += 1;
+            } else {
+                println!("\n✗ Error: Tool was not called");
+                failure_count += 1;
+            }
         }
         Err(e) => {
             println!("\n✗ Error: {}", e);
@@ -365,13 +531,34 @@ async fn run_demo(agent: impl Chat, provider_key: &str) -> Result<(usize, usize)
     println!("Input: {}...", &SAMPLE_EMAIL[..100].trim());
     println!();
 
-    match extract_email_info(SAMPLE_EMAIL, &agent).await {
-        Ok(result) => {
-            let json = serde_json::to_string_pretty(&result)?;
-            println!("\nExtracted Data:");
-            println!("{}", json);
-            println!("\nValidation: ✓ All required fields present");
-            success_count += 1;
+    let email_result: Arc<Mutex<Option<EmailInfo>>> = Arc::new(Mutex::new(None));
+    let agent = rig::agent::AgentBuilder::new(model)
+        .tool(ExtractEmailInfo { result: email_result.clone() })
+        .build();
+
+    let prompt = format!(
+        r#"Extract structured email information from this text:
+
+{}
+
+Use the extract_email_info tool to submit the extracted data."#,
+        SAMPLE_EMAIL.trim()
+    );
+
+    match agent.prompt(&prompt).max_turns(5).await {
+        Ok(_) => {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let result = email_result.lock().unwrap();
+            if let Some(ref info) = *result {
+                let json = serde_json::to_string_pretty(info)?;
+                println!("\nExtracted Data:");
+                println!("{}", json);
+                println!("\nValidation: ✓ All required fields present");
+                success_count += 1;
+            } else {
+                println!("\n✗ Error: Tool was not called");
+                failure_count += 1;
+            }
         }
         Err(e) => {
             println!("\n✗ Error: {}", e);
