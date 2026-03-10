@@ -417,32 +417,47 @@ A progressive roadmap of use cases, each implemented in **Python** and **Rust** 
 
 ---
 
-## 📋 13 — Workflow Automation Agent
+## ✅ 13 — Workflow Automation Agent
+
+- **Status:** Done
+- **Python:** `langgraph>=0.2.0` + mock tools + LangGraph workflow
+- **Rust:** `rig-core>=0.32` + mock tools + manual execution loop
 
 > An agent that takes a high-level instruction (e.g., "Schedule a meeting with the team about the Q2 roadmap") and breaks it into steps, executing each via tool calls. Simulates real-world integrations.
 
 **Key learning:** Task decomposition, sequential tool execution, error recovery, real-world API simulation.
 
 ### Python (`langgraph`)
-- [ ] Set up `pyproject.toml` with `langgraph`, `langchain-openai`
-- [ ] Define mock tools simulating external services:
-  - [ ] `send_email(to, subject, body) -> str` — logs email details, returns confirmation
-  - [ ] `create_calendar_event(title, date, attendees) -> str` — logs event, returns ID
-  - [ ] `create_task(title, assignee, due_date) -> str` — logs task, returns ID
-  - [ ] `search_contacts(query) -> list[Contact]` — returns mock contact list
-- [ ] Build an agent that decomposes complex instructions into tool calls:
-  - [ ] `"Schedule a meeting with Alice and Bob next Tuesday about Q2 planning, then email them the agenda"`
-  - [ ] Agent should: search contacts → create event → draft agenda → send emails
-  - [ ] `"Create a task for each team member to review the design doc by Friday"`
-  - [ ] Agent should: search contacts → create multiple tasks
-- [ ] Print the full execution plan (steps taken, tools called, results)
-- [ ] Handle partial failures (e.g., contact not found → skip and report)
+- [x] Set up `pyproject.toml` with `langgraph`, `langchain-openai`, `langchain-anthropic`, `python-dotenv`, `pydantic`
+- [x] Define mock tools simulating external services:
+  - [x] `send_email(to, subject, body) -> str` — logs email details, returns confirmation
+  - [x] `create_calendar_event(title, date, attendees) -> str` — logs event, returns ID
+  - [x] `create_task(title, assignee, context, due_date) -> str` — logs task, returns ID
+  - [x] `search_contacts(query) -> list[Contact]` — returns mock contact list
+- [x] Build a LangGraph workflow: decomposer → planner → executor → aggregator
+- [x] Hard-coded contact database with 5 mock contacts
+- [x] Task decomposer node: breaks instruction into structured steps
+- [x] Execution planner: sequences steps, identifies dependencies
+- [x] Tool executor: executes tools sequentially with error handling
+- [x] Results aggregator: formats and prints execution summary
+- [x] Error recovery: placeholder contacts for missing entries
+- [x] 3 demo scenarios:
+  - [x] Meeting scheduling with email
+  - [x] Bulk task assignment
+  - [x] Partial failure recovery
+- [x] Print execution summary with tool call log
+- [x] Multi-provider support (openai, anthropic, openrouter)
 
 ### Rust (`rig-core`)
-- [ ] Set up `Cargo.toml` with `rig-core`, `tokio`, `serde`, `chrono`
-- [ ] Implement the same mock tools as Rust structs
-- [ ] Build the same multi-step workflow execution
-- [ ] Compare how each language handles the decomposition and error recovery
+- [x] Set up `Cargo.toml` with `rig-core`, `tokio`, `serde`, `serde_json`, `chrono`, `anyhow`
+- [x] Implement the same mock tools as async functions
+- [x] Hard-coded contact database with 5 mock contacts
+- [x] Task decomposer: LLM breaks instruction into structured JSON steps
+- [x] Execution loop: processes steps sequentially
+- [x] Error recovery: placeholder contacts for missing entries
+- [x] 3 demo scenarios matching Python implementation
+- [x] Print execution summary with tool call log
+- [x] Multi-provider support (openai, anthropic, openrouter)
 
 ---
 
