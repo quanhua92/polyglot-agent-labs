@@ -342,32 +342,46 @@ A progressive roadmap of use cases, each implemented in **Python** and **Rust** 
 
 ---
 
-## 📋 11 — Code Review Agent
+## ✅ 11 — Code Review Agent
+
+- **Status:** Done
+- **Python:** `langchain>=1.0.10` + file I/O tools + structured code review output
+- **Rust:** `rig-core>=0.32` + file I/O tools + structured code review output
 
 > An agent that reads source code files, analyzes them, and provides structured code review feedback (bugs, style issues, security concerns, improvement suggestions).
 
 **Key learning:** Large context handling, code analysis prompts, structured feedback, file I/O tools.
 
-### Python (`langgraph`)
-- [ ] Set up `pyproject.toml` with `langgraph`, `langchain-openai`
-- [ ] Define tools:
-  - [ ] `read_file(path: str) -> str` — reads a source file
-  - [ ] `list_files(directory: str) -> list[str]` — lists files in a directory
-- [ ] Define structured output schema:
-  - [ ] `ReviewFinding { file, line, severity, category, message, suggestion }`
-  - [ ] `CodeReview { summary, findings[], overall_score }`
-- [ ] Build an agent that:
-  - [ ] Reads one or more files from a sample `code_samples/` directory
-  - [ ] Analyzes each file for bugs, style, security, and performance
-  - [ ] Returns a structured `CodeReview`
-- [ ] Provide 2–3 sample code files with intentional issues (e.g., SQL injection, unused variables, poor error handling)
-- [ ] Print a formatted review report (table of findings + overall score)
+### Python (`langchain`)
+- [x] Set up `pyproject.toml` with `langchain`, `langchain-openai`, `langchain-anthropic`, `python-dotenv`, `pydantic`
+- [x] Define tools:
+  - [x] `read_file(path: str) -> str` — reads a source file with line numbers
+  - [x] `list_files(directory: str) -> list[str]` — lists files in a directory
+  - [x] `get_sample_file(file_name: str) -> str` — gets hard-coded sample files
+- [x] Define structured output schema:
+  - [x] `ReviewFinding { severity, category, line_number, code_snippet, message, suggestion }`
+  - [x] `CodeReview { summary, findings[], overall_score, file_count, lines_reviewed }`
+- [x] Four severity levels: critical, high, medium, low
+- [x] Four categories: bugs, security, style, best_practices
+- [x] Scoring system: 0-100 based on findings (Critical: -20, High: -10, Medium: -5, Low: -2)
+- [x] Build code review agent that analyzes code and returns structured feedback
+- [x] Provide 3 sample code files with intentional issues:
+  - [x] `insecure_login.py` — SQL injection, hardcoded credentials
+  - [x] `poor_error_handling.py` — division by zero, unused imports, magic numbers
+  - [x] `resource_leak.py` — file leak, mutable default, missing docstring
+- [x] Print a formatted review report with findings grouped by severity
+- [x] Multi-provider support (openai, anthropic, openrouter)
 
 ### Rust (`rig-core`)
-- [ ] Set up `Cargo.toml` with `rig-core`, `tokio`, `serde`, `schemars`
-- [ ] Implement `ReadFile` and `ListFiles` tools
-- [ ] Define equivalent Rust structs for review output
-- [ ] Run on the same sample files and compare feedback quality
+- [x] Set up `Cargo.toml` with `rig-core`, `tokio`, `serde`, `serde_json`, `regex`
+- [x] Implement file I/O functions: `list_files`, `read_file`, `get_sample_file`
+- [x] Define equivalent Rust structs for review output with `#[derive(Deserialize, Serialize)]`
+- [x] Four severity levels and four categories matching Python implementation
+- [x] Scoring system matching Python implementation
+- [x] JSON extraction helper for parsing LLM responses
+- [x] Same 3 sample code files as Python implementation
+- [x] Formatted report printing with findings grouped by severity
+- [x] Multi-provider support (openai, openrouter)
 
 ---
 
