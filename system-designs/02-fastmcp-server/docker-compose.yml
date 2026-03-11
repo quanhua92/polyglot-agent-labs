@@ -1,0 +1,8 @@
+services:
+  fastmcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fastmcp-server
+    ports:
+      - "8002:8002"
