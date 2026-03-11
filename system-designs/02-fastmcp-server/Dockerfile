@@ -16,5 +16,5 @@ COPY server.py ./
 
 EXPOSE 8002
 
-# Run the server with uvicorn (HTTP transport)
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the server
+CMD ["python", "server.py"]
