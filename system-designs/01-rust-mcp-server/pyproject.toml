@@ -1,0 +1,6 @@
+[project]
+name = "mcp-client"
+version = "0.1.0"
+description = "MCP client for testing Rust MCP server"
+requires-python = ">=3.12"
+dependencies = ["requests", "mcp"]

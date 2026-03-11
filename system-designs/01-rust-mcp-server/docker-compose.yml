@@ -1,0 +1,8 @@
+services:
+  mcp-server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: mcp-server
+    ports:
+      - "3001:3001"

@@ -65,3 +65,32 @@ py-lint id:
 # Run Rust clippy for a use-case
 rs-lint id:
     cd use-cases/{{id}}/rust && cargo clippy -- -D warnings
+
+# =============================================================================
+# SYSTEM DESIGNS
+# =============================================================================
+
+# List available system designs
+sys-list:
+    @ls system-designs
+
+# Start a system design (docker compose up -d)
+sys-up name:
+    @cd system-designs/{{name}} && docker compose up -d
+
+# Stop a system design (docker compose down)
+sys-down name:
+    @cd system-designs/{{name}} && docker compose down
+
+# View logs for a system design
+sys-logs name:
+    @cd system-designs/{{name}} && docker compose logs -f
+
+# Run the client for a system design
+sys-client name:
+    @cd system-designs/{{name}} && uv run test_client.py
+
+# Start a system design and show info
+sys-run name:
+    @cd system-designs/{{name}} && docker compose up -d
+    @echo "Server started. Run 'just sys-client {{name}}' in another terminal to test."
