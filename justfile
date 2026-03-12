@@ -74,8 +74,9 @@ rs-lint id:
 sys-list:
     @ls system-designs
 
-# Start a system design (docker compose up -d)
+# Start a system design (docker compose down then up -d)
 sys-up name:
+    @cd system-designs/{{name}} && docker compose down
     @cd system-designs/{{name}} && docker compose up -d
 
 # Stop a system design (docker compose down)
@@ -88,7 +89,7 @@ sys-logs name:
 
 # Run the client for a system design
 sys-client name:
-    @cd system-designs/{{name}} && uv run test_client.py
+    @cd system-designs/{{name}} && uv run python test_client.py
 
 # Start a system design and show info
 sys-run name:

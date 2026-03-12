@@ -1,0 +1,18 @@
+[project]
+name = "faq-workflow-server"
+version = "0.1.0"
+description = "FAQ Workflow Server using FastMCP and LangGraph"
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=3.1.0",
+    "langgraph>=0.2.0",
+    "langchain-openai>=0.2.0",
+    "langchain-anthropic>=0.2.0",
+    "langchain-mcp-adapters>=0.1.0",
+    "python-dotenv>=1.0.0",
+    "httpx>=0.27.0",
+    "uvicorn>=0.30.0",
+]
+
+[project.scripts]
+faq-workflow-server = "server:main"

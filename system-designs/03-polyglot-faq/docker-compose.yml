@@ -1,0 +1,46 @@
+services:
+  doc-search-server:
+    build:
+      context: ./doc-search-server
+      dockerfile: Dockerfile
+    container_name: faq-doc-search
+    ports:
+      - "8004:8004"
+    networks:
+      - faq-network
+
+  workflow-server:
+    build:
+      context: ./workflow-server
+      dockerfile: Dockerfile
+    container_name: faq-workflow
+    ports:
+      - "8003:8003"
+    environment:
+      - DOC_SEARCH_URL=http://doc-search-server:8004/mcp
+      - LLM_PROVIDER=${LLM_PROVIDER:-openrouter}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+    networks:
+      - faq-network
+    depends_on:
+      - doc-search-server
+
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: faq-api-gateway
+    ports:
+      - "3030:3000"
+    environment:
+      - WORKFLOW_MCP_URL=http://workflow-server:8003
+    networks:
+      - faq-network
+    depends_on:
+      - workflow-server
+
+networks:
+  faq-network:
+    driver: bridge
