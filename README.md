@@ -54,6 +54,23 @@ polyglot-agent-labs/
 | `just sys-client <name>` | Run test client |
 | `just sys-logs <name>` | View service logs |
 
+## Use Cases
+
+| ID | Use Case | Description | Commands |
+|----|----------|-------------|----------|
+| 00 | Hello World | Basic agent setup and initialization | `just compare 00-hello-world` |
+| 01 | Simple Completion | Single LLM call for direct responses | `just compare 01-simple-completion` |
+| 02 | MCP Server | Tool definition and exposure via MCP | `just compare 02-mcp-server` |
+| 03 | Conversational Agent | Memory and context management | `just compare 03-conversational-agent` |
+| 04 | Agent Tool Use | Function calling and tool execution | `just compare 04-agent-tool-use` |
+| 05 | RAG Local Docs | Local document retrieval and Q&A | `just compare 05-rag-local-docs` |
+| 06 | Structured Output | JSON schema validation and formatting | `just compare 06-structured-output` |
+| 08 | Multi-Agent | Agent collaboration and coordination | `just compare 08-multi-agent-collaboration` |
+| 10 | Customer Support | Real-world support automation | `just compare 10-customer-support-agent` |
+| 11 | Code Review | Code analysis and review automation | `just compare 11-code-review-agent` |
+| 13 | Workflow Automation | Task orchestration and automation | `just compare 13-workflow-automation-agent` |
+| 14 | Content Writing | Creative content generation | `just compare 14-content-writing-agent` |
+
 ## System Designs
 
 ### 01-rust-mcp-server
